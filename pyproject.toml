@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools==84.2.1", "wheel==0.48.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "steel-energy-mlops"
+version = "0.1.0"
+description = "Reproducible data preparation and MLOps for industrial electricity consumption."
+readme = "README.md"
+requires-python = ">=3.12"
+dynamic = ["dependencies"]
+
+[project.scripts]
+steel-energy = "steel_energy_mlops.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--import-mode=importlib"]
+
+[tool.coverage.run]
+branch = true
+source = ["src", "tests"]
+relative_files = true
+
+[tool.coverage.report]
+fail_under = 95
+precision = 2
+show_missing = true
+
+[tool.pyright]
+include = ["src"]
+typeCheckingMode = "standard"
+pythonVersion = "3.12"
+venvPath = "."
+venv = ".venv"

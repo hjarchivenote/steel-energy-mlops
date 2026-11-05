@@ -1,0 +1,30 @@
+schema: '2.0'
+stages:
+  prepare:
+    cmd: python -m steel_energy_mlops prepare-data --input
+      data/coursework/Steel_industry_data_5000.csv --output data/processed
+      --expected-rows 5000 --train-fraction 0.70 --validation-fraction 0.15
+    deps:
+    - path: data/coursework/Steel_industry_data_5000.csv
+      hash: md5
+      md5: 34e99fc603c4761bfeb2fff03e26759b
+      size: 390017
+    - path: pyproject.toml
+      hash: md5
+      md5: 7d43910e1a6d81551f80d231159673d7
+      size: 887
+    - path: requirements.txt
+      hash: md5
+      md5: 53bb618e1249187d244f384bc22cf3f6
+      size: 47
+    - path: src/steel_energy_mlops
+      hash: md5
+      md5: b0169f4c864fcfd476af8d046bb42163.dir
+      size: 12116
+      nfiles: 6
+    outs:
+    - path: data/processed
+      hash: md5
+      md5: 28327363d4b7cd55d6d30f0074d4ee10.dir
+      size: 684612
+      nfiles: 4

@@ -1,0 +1,16 @@
+stages:
+  prepare:
+    cmd: >-
+      python -m steel_energy_mlops prepare-data
+      --input data/coursework/Steel_industry_data_5000.csv
+      --output data/processed
+      --expected-rows 5000
+      --train-fraction 0.70
+      --validation-fraction 0.15
+    deps:
+      - data/coursework/Steel_industry_data_5000.csv
+      - src/steel_energy_mlops
+      - pyproject.toml
+      - requirements.txt
+    outs:
+      - data/processed
