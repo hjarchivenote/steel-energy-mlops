@@ -1,0 +1,33 @@
+repos:
+  - repo: local
+    hooks:
+      - id: flake8
+        name: Flake8 (all Python files)
+        entry: python -m flake8 .
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: pyright
+        name: Pyright (src, standard)
+        entry: python -m pyright
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: tests
+        name: Tests with branch coverage
+        entry: python -m coverage run -m pytest
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: source-coverage
+        name: Source coverage >= 95%
+        entry: python -m coverage report --include=src/* --fail-under=95
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: test-coverage
+        name: Test code coverage >= 95%
+        entry: python -m coverage report --include=tests/* --fail-under=95
+        language: system
+        pass_filenames: false
+        always_run: true
