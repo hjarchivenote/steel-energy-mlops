@@ -33,8 +33,7 @@ logs/
 *.db
 *.sqlite
 *.sqlite3
-/data/processed/*
-!/data/processed/.gitkeep
+/data/processed/
 
 # Coursework upload packages stay local
 /submission/
