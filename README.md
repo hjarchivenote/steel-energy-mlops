@@ -63,6 +63,22 @@ Timestamps remain timezone-naive as supplied by the dataset. The preparation cod
 
 Each preparation run writes `train.csv`, `validation.csv`, `test.csv`, and a machine-readable `manifest.json` containing source/output hashes, feature names, partition sizes, and date boundaries. It creates no trained model and uses no row-based lag features.
 
+### Candidate inputs for a 15-minute forecast
+
+The candidate task estimates `Usage_kWh` at a requested timestamp using information available 15 minutes earlier. It uses the calendar features and the latest available historical consumption, reactive-energy and power-factor readings, with the measurement age and a history-availability indicator. The input builder requires measurement time ≤ arrival time ≤ forecast origin and retains the selected measurement and arrival timestamps for inspection.
+
+The [UCI variable descriptions](https://archive.ics.uci.edu/dataset/851/steel+industry+energy+consumption) do not establish when these readings reach a forecasting system. The following audit simulates a 15-minute reporting delay and examines only the 3,500 training observations.
+
+```bash
+steel-energy audit-inputs --reporting-delay-minutes 15
+```
+
+Only 14.2% of successive training observations are exactly 15 minutes apart. Under the simulated delay, the selected historical reading has a median age of 75 minutes at forecast origin and a maximum age of 825 minutes. When no measurement has arrived, the historical fields are zero with `history_available=0`.
+
+A same-row calculation using lagging reactive energy and power factor approximately reconstructs the target, with a median absolute difference of 0.0010 kWh among 2,786 eligible training rows. CO₂ has a training-target correlation of 0.991 and ambiguous units. These diagnostics motivate excluding same-row electrical measurements and CO₂. `Load_Type` remains excluded pending evidence of its derivation and availability before the forecast.
+
+MLflow records the input decisions, source hashes and timestamps for the candidate training features. The next evaluation requires a rolling backtest against the calendar reference and a forecast that repeats the latest available consumption reading. Candidate adoption depends on performance under the declared availability rule, including high-usage errors. The current results below describe the calendar model.
+
 ## Model comparison and practical meaning
 
 The first experiment uses the fixed coursework sample, seed 42, and the same seven calendar predictors for every model. Hyperparameters and the winning learned family are selected **only inside the 3,500-row training partition**, using three expanding windows with comparable elapsed-time validation periods. Row counts can differ because the sample is irregularly spaced. Scaling is fitted inside each Ridge pipeline's CV fold.

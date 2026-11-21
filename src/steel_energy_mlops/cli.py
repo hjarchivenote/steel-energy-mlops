@@ -14,6 +14,7 @@ import uvicorn
 from steel_energy_mlops.api import create_app
 from steel_energy_mlops.data import DataValidationError
 from steel_energy_mlops.evaluation import evaluate_champion
+from steel_energy_mlops.input_audit import audit_inputs
 from steel_energy_mlops.modeling import LEARNED_FAMILIES
 from steel_energy_mlops.prediction import predict_consumption
 from steel_energy_mlops.preparation import prepare_dataset
@@ -56,6 +57,12 @@ def main(arguments: Sequence[str] | None = None) -> int:
     evaluate.add_argument("--data", type=Path, default=Path("data/processed"))
     evaluate.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
     evaluate.add_argument("--model-name", default=DEFAULT_MODEL)
+    audit = commands.add_parser("audit-inputs", help="Audit training inputs and a causal 15-minute forecast contract")
+    audit.add_argument("--input", type=Path, default=Path("data/coursework/Steel_industry_data_5000.csv"))
+    audit.add_argument("--data", type=Path, default=Path("data/processed"))
+    audit.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
+    audit.add_argument("--reporting-delay-minutes", type=int, required=True,
+                       help="Explicit assumed measurement reporting delay for the offline audit")
     serve = commands.add_parser("serve", help="Run the local prediction HTTP service and interactive API docs")
     serve.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
     serve.add_argument("--model-name", default=DEFAULT_MODEL)
@@ -84,6 +91,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
                                   args.minimum_improvement, args.seed)
         elif args.command == "evaluate":
             result = evaluate_champion(args.data, args.workspace, args.model_name)
+        elif args.command == "audit-inputs":
+            result = audit_inputs(args.input, args.data, args.reporting_delay_minutes, args.workspace)
         elif args.command == "serve":
             uvicorn.run(create_app(args.workspace, args.model_name, args.data),
                         host=args.host, port=args.port, workers=1)
@@ -98,7 +107,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
     except (DataValidationError, ValueError, OSError, UnicodeError, csv.Error, MlflowException) as exc:
         operations = {"prepare-data": "Data preparation", "train": "Model training", "predict": "Prediction",
                       "evaluate": "Validation diagnostics", "serve": "API startup",
-                      "export-model": "Model export", "init-runtime": "Runtime initialization"}
+                      "export-model": "Model export", "init-runtime": "Runtime initialization",
+                      "audit-inputs": "Input audit"}
         operation = operations[args.command]
         print(f"{operation} failed: {exc}", file=sys.stderr)
         return 2

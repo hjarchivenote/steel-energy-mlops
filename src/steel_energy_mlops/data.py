@@ -33,11 +33,22 @@ class DataValidationError(ValueError):
 
 
 @dataclass(frozen=True)
+class ElectricalReadings:
+    """Same-timestamp measurements, retained for audited historical input construction."""
+
+    lagging_reactive_kvarh: float
+    leading_reactive_kvarh: float
+    lagging_power_factor_percent: float
+    leading_power_factor_percent: float
+
+
+@dataclass(frozen=True)
 class EnergyRecord:
-    """Only timestamp and target survive validation; other measurements are excluded."""
+    """Validated observations; retaining measurements does not approve same-row model inputs."""
 
     timestamp: datetime
     usage_kwh: float
+    electrical: ElectricalReadings | None = None
 
 
 @dataclass(frozen=True)
@@ -88,7 +99,10 @@ def _parse_record(row: dict[str, str], line: int) -> EnergyRecord:
         raise DataValidationError(f"Row {line}: WeekStatus does not match the timestamp.")
     if row["Load_Type"] not in LOAD_TYPES:
         raise DataValidationError(f"Row {line}: unknown Load_Type.")
-    return EnergyRecord(timestamp, numeric[TARGET])
+    return EnergyRecord(timestamp, numeric[TARGET], ElectricalReadings(
+        numeric["Lagging_Current_Reactive.Power_kVarh"], numeric["Leading_Current_Reactive_Power_kVarh"],
+        numeric["Lagging_Current_Power_Factor"], numeric["Leading_Current_Power_Factor"],
+    ))
 
 
 def load_dataset(path: Path, expected_rows: int | None = None) -> ValidatedDataset:

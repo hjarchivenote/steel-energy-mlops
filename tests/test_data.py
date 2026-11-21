@@ -9,6 +9,7 @@ from steel_energy_mlops.data import (
     NUMERIC_COLUMNS,
     SOURCE_COLUMNS,
     DataValidationError,
+    ElectricalReadings,
     EnergyRecord,
     load_dataset,
     split_chronologically,
@@ -19,7 +20,7 @@ from tests.helpers import make_row, write_csv
 def test_loads_bom_csv_with_byte_provenance(dataset_path: Path) -> None:
     result = load_dataset(dataset_path, expected_rows=20)
     assert len(result.records) == 20
-    assert result.records[0] == EnergyRecord(datetime(2018, 1, 1), 0.0)
+    assert result.records[0] == EnergyRecord(datetime(2018, 1, 1), 0.0, ElectricalReadings(2.0, 1.0, 80.0, 90.0))
     assert result.source_sha256 == hashlib.sha256(dataset_path.read_bytes()).hexdigest()
     assert load_dataset(dataset_path).records == result.records
 
