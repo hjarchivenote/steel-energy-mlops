@@ -72,7 +72,7 @@ def test_compose_build_restore_predict_and_train(tmp_path, pytestconfig, monkeyp
             assert response.status == 200
         assert request(api + "/health")[1]["status"] == "ok"
         ready = request(api + "/ready")[1]
-        assert ready["model_version"] == "1" and ready["promotion_policy"] == "calendar-reference-v2"
+        assert ready["model_version"] == "1" and ready["promotion_policy"] == "calendar-reference-v3"
         assert compose("exec", "-T", "api", "id", "-u").stdout.strip() == "10001"
         with urlopen(ui + "/health", timeout=20) as response:
             assert response.status == 200

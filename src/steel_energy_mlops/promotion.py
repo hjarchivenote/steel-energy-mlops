@@ -4,11 +4,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
+from numpy.typing import NDArray
 
 from steel_energy_mlops.data import DataValidationError
-from steel_energy_mlops.modeling import BASELINES, ErrorMetrics
+from steel_energy_mlops.modeling import BASELINES, ErrorMetrics, error_metrics
 
-PROMOTION_POLICY = "calendar-reference-v2"
+PROMOTION_POLICY = "calendar-reference-v3"
 MINIMUM_IMPROVEMENT = 0.01
 REQUIRED_REFERENCES = (*BASELINES, "weekday_hour_mean", "weekday_hour_median")
 
@@ -29,6 +30,57 @@ class PromotionDecision:
     eligible: bool
     reason: str
     checks: tuple[ReferenceCheck, ...]
+
+
+@dataclass(frozen=True)
+class TailMetrics:
+    p95_absolute_error: float
+    high_usage_mae: float | None
+    high_usage_bias: float | None
+
+
+@dataclass(frozen=True)
+class TailDecision:
+    eligible: bool
+    reason: str
+    training_q75: float
+    high_usage_rows: int
+    candidate: TailMetrics
+    incumbent: TailMetrics | None
+
+
+def tail_promotion_decision(
+    train_target: NDArray[np.float64], validation_target: NDArray[np.float64],
+    candidate_prediction: NDArray[np.float64], incumbent_prediction: NDArray[np.float64] | None = None,
+) -> TailDecision:
+    """Prospective guard against worse tail errors and high-usage bias; the cutoff is training-only."""
+    error_metrics(train_target, train_target)
+    error_metrics(validation_target, validation_target)
+    threshold = float(np.quantile(train_target, 0.75))
+    high = validation_target > threshold
+    count = int(high.sum())
+
+    def metrics(prediction: NDArray[np.float64]) -> TailMetrics:
+        error_metrics(validation_target, prediction)
+        error = prediction - validation_target
+        return TailMetrics(float(np.quantile(np.abs(error), 0.95)),
+                           float(np.mean(np.abs(error[high]))) if count else None,
+                           float(np.mean(error[high])) if count else None)
+
+    candidate = metrics(candidate_prediction)
+    incumbent = None if incumbent_prediction is None else metrics(incumbent_prediction)
+    reason = "tail_checks_passed"
+    if incumbent is None:
+        reason = "no_incumbent_for_tail_comparison"
+    elif candidate.p95_absolute_error > incumbent.p95_absolute_error:
+        reason = "incumbent_p95_worse"
+    elif candidate.high_usage_mae is not None and incumbent.high_usage_mae is not None:
+        if candidate.high_usage_mae > incumbent.high_usage_mae:
+            reason = "incumbent_high_usage_mae_worse"
+        elif (candidate.high_usage_bias is not None and incumbent.high_usage_bias is not None
+              and abs(candidate.high_usage_bias) > abs(incumbent.high_usage_bias)):
+            reason = "incumbent_high_usage_bias_worse"
+    return TailDecision(not reason.endswith("worse"), reason, threshold, count, candidate, incumbent)
 
 
 def validate_improvement(minimum_improvement: float) -> None:

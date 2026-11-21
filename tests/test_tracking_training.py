@@ -17,7 +17,8 @@ from steel_energy_mlops.cli import main
 from steel_energy_mlops.data import DataValidationError
 from steel_energy_mlops.features import calendar_features
 from steel_energy_mlops.prediction import predict_consumption
-from steel_energy_mlops.promotion import PROMOTION_POLICY, REQUIRED_REFERENCES
+from steel_energy_mlops.promotion import PROMOTION_POLICY, REQUIRED_REFERENCES, PromotionDecision
+from steel_energy_mlops.promotion import TailDecision, TailMetrics
 from steel_energy_mlops.preparation import prepare_dataset
 from steel_energy_mlops.tracking import champion_version, open_store, validate_model_name
 from steel_energy_mlops.training import train_models
@@ -78,6 +79,21 @@ def test_identical_candidate_is_rejected_without_replacing_champion(training_ses
     assert result["candidate_version"] != before
     assert result["previous_champion_version"] == before
     assert str(champion_version(client, session["model_name"]).version) == str(before)
+
+
+def test_tail_veto_preserves_champion_even_when_mae_and_rmse_checks_pass(training_session, monkeypatch) -> None:
+    session = training_session
+    client, _ = open_store(session["workspace"], "steel-energy-training")
+    previous = champion_version(client, session["model_name"]).version
+    monkeypatch.setattr(training, "promotion_decision", lambda *args: PromotionDecision(True, "improved_champion", ()))
+    veto = TailDecision(False, "incumbent_high_usage_bias_worse", 50., 100,
+                        TailMetrics(20., 12., -10.), TailMetrics(21., 13., -8.))
+    monkeypatch.setattr(training, "tail_promotion_decision", lambda *args: veto)
+    result = train_models(session["directory"], session["workspace"], session["model_name"], families=("ridge",))
+    assert result["promoted"] is False and result["reason"] == "incumbent_high_usage_bias_worse"
+    assert champion_version(client, session["model_name"]).version == previous
+    saved = json.loads(Path(client.download_artifacts(result["run_id"], "promotion_decision.json")).read_text())
+    assert saved["policy"]["tail_guard"]["eligible"] is False
 
 
 def test_prediction_logs_exact_request_and_response(training_session: dict[str, Any]) -> None:

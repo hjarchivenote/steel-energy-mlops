@@ -5,11 +5,43 @@ import pytest
 
 from steel_energy_mlops.data import DataValidationError
 from steel_energy_mlops.modeling import ErrorMetrics
-from steel_energy_mlops.promotion import REQUIRED_REFERENCES, promotion_decision
+from steel_energy_mlops.promotion import REQUIRED_REFERENCES, promotion_decision, tail_promotion_decision
 
 
 def references() -> dict[str, ErrorMetrics]:
     return dict.fromkeys(REQUIRED_REFERENCES, ErrorMetrics(10, 15))
+
+
+@pytest.mark.parametrize("candidate,incumbent,reason", [
+    ([1, 11, 25, 45], [2, 12, 20, 40], "tail_checks_passed"),
+    ([20, 10, 30, 50], [2, 12, 20, 40], "incumbent_p95_worse"),
+    ([0, 10, 18, 38], [30, 10, 20, 40], "incumbent_high_usage_mae_worse"),
+    ([0, 10, 25, 45], [30, 10, 20, 60], "incumbent_high_usage_bias_worse"),
+])
+def test_tail_and_high_usage_errors_can_independently_veto_promotion(candidate, incumbent, reason) -> None:
+    decision = tail_promotion_decision(np.asarray([0., 10., 20., 30.]), np.asarray([0., 10., 30., 50.]),
+                                       np.asarray(candidate, dtype=float), np.asarray(incumbent, dtype=float))
+    assert decision.training_q75 == 22.5 and decision.high_usage_rows == 2
+    assert decision.reason == reason and decision.eligible == (reason == "tail_checks_passed")
+
+
+def test_tail_guard_distinguishes_no_incumbent_and_no_high_usage_observations() -> None:
+    train = np.asarray([0., 10., 20., 30.])
+    target = np.asarray([0., 5., 10.])
+    initial = tail_promotion_decision(train, target, target)
+    assert initial.eligible and initial.reason == "no_incumbent_for_tail_comparison"
+    assert initial.incumbent is None and initial.high_usage_rows == 0
+    assert initial.candidate.high_usage_mae is None and initial.candidate.high_usage_bias is None
+    compared = tail_promotion_decision(train, target, target, target + 1)
+    assert compared.eligible and compared.reason == "tail_checks_passed"
+
+
+@pytest.mark.parametrize("location", ["train", "validation", "candidate", "incumbent"])
+def test_tail_guard_rejects_nonfinite_or_mismatched_inputs(location) -> None:
+    values = {name: np.asarray([1., 2., 3., 4.]) for name in ("train", "validation", "candidate", "incumbent")}
+    values[location] = np.asarray([float("nan")])
+    with pytest.raises(DataValidationError):
+        tail_promotion_decision(values["train"], values["validation"], values["candidate"], values["incumbent"])
 
 
 @pytest.mark.parametrize("incumbent,reason,count", [

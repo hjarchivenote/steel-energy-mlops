@@ -22,6 +22,7 @@ from steel_energy_mlops.features import FEATURE_NAMES
 from steel_energy_mlops.modeling import BASELINES, LEARNED_FAMILIES, ErrorMetrics, error_metrics, fit_candidates
 from steel_energy_mlops.promotion import MINIMUM_IMPROVEMENT, PROMOTION_POLICY, REQUIRED_REFERENCES
 from steel_energy_mlops.promotion import promotion_decision, validate_improvement
+from steel_energy_mlops.promotion import PromotionDecision, tail_promotion_decision
 from steel_energy_mlops.seasonal import LEVEL_NAMES, PROFILE_STATISTICS, fit_schedule_profile
 from steel_energy_mlops.tracking import DEFAULT_MODEL, DEFAULT_WORKSPACE, champion_version, open_store
 from steel_energy_mlops.tracking import require_compatible_version, validate_model_name
@@ -67,6 +68,7 @@ def _train_locked(
     client, experiment_id = open_store(workspace, "steel-energy-training")
     incumbent_version = champion_version(client, model_name)
     incumbent_metrics = None
+    incumbent_predictions = None
     if incumbent_version is not None:
         require_compatible_version(incumbent_version)
         training_cutoff = incumbent_version.tags.get("train_last_timestamp")
@@ -75,8 +77,8 @@ def _train_locked(
         incumbent_model = load_model(f"models:/{model_name}/{incumbent_version.version}")
         if not isinstance(incumbent_model, Pipeline):
             raise DataValidationError("Registered champion must contain a fitted sklearn Pipeline.")
-        predictions = np.asarray(incumbent_model.predict(data.validation.features), dtype=np.float64)
-        incumbent_metrics = error_metrics(data.validation.target, predictions)
+        incumbent_predictions = np.asarray(incumbent_model.predict(data.validation.features), dtype=np.float64)
+        incumbent_metrics = error_metrics(data.validation.target, incumbent_predictions)
 
     with mlflow.start_run(experiment_id=experiment_id, run_name="train-and-validate") as run:
         job_id = os.environ.get("STEEL_ENERGY_TRAINING_JOB_ID")
@@ -146,6 +148,11 @@ def _train_locked(
                         "validation/schedule_reference_metadata.json")
         references = {name: metrics[name] for name in REQUIRED_REFERENCES}
         decision = promotion_decision(metrics[selected.name], references, incumbent_metrics, minimum_improvement)
+        tail = tail_promotion_decision(data.train.target, data.validation.target,
+                                       np.asarray(selected.model.predict(data.validation.features), dtype=np.float64),
+                                       incumbent_predictions)
+        if decision.eligible and not tail.eligible:
+            decision = PromotionDecision(False, tail.reason, decision.checks)
         policy = {
             "id": PROMOTION_POLICY, "primary_metric": "validation_mae",
             "minimum_improvement": minimum_improvement, "minimum_allowed_improvement": MINIMUM_IMPROVEMENT,
@@ -153,6 +160,7 @@ def _train_locked(
             "mae_rule": "strictly lower and at least the minimum relative improvement against every comparison",
             "rmse_rule": "no increase against any reference or the incumbent",
             "candidate": metrics[selected.name].as_dict(), "checks": [asdict(check) for check in decision.checks],
+            "tail_guard": asdict(tail),
         }
         mlflow.log_dict({"eligible": decision.eligible, "reason": decision.reason, "policy": policy},
                         "promotion_decision.json")

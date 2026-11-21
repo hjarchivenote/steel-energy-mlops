@@ -68,7 +68,7 @@ def test_ready_loads_the_model_without_creating_runs(api_sessions) -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "ready" and body["model_name"] == session["name"]
-    assert body["promotion_policy"] == "calendar-reference-v2" and body["unit"] == "kWh"
+    assert body["promotion_policy"] == "calendar-reference-v3" and body["unit"] == "kWh"
     assert body["request_id"] == response.headers["X-Request-ID"]
     assert len(tracker.search_runs(experiments)) == before
 
