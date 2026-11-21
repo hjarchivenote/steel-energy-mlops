@@ -242,7 +242,15 @@ HTTP audit records include the training job ID and, after completion, its MLflow
 
 ### Docker Compose runtime
 
-The API and MLflow UI share one application image and a named volume. Prerequisites are Docker with Compose, the fixed prepared data in `data/processed`, and an exported existing champion. CSV files and model artifacts are excluded from Git and the image, so a fresh clone needs these artifacts restored first. Shared DVC/model artifact storage is still pending.
+The portable runtime ZIP contains the project source, the prepared training and validation partitions, and the approved champion export. Extract it into a new directory and run the following from the extracted `steel-energy-mlops` directory with Docker and Compose installed.
+
+```bash
+docker compose up --build -d --wait
+```
+
+The initial build needs access to the Python base image and dependency packages. The initializer checks the data and model checksums and restores the approved model into a fresh registry. The ZIP supplies the runtime data and model files required by this command. It leaves the final test partition and local experiment history in the development workspace.
+
+For development from a Git checkout, the API and MLflow UI share one application image and a named volume. Restore the prepared data in `data/processed` and export an existing champion before starting. Git tracks the data metadata. Shared DVC/model artifact storage is still pending.
 
 For the current local experiment store, create the portable model export once in the activated Python environment:
 
@@ -261,7 +269,7 @@ docker compose up --build -d --wait
 - [Container API and interactive documentation](http://127.0.0.1:18000/docs)
 - [Container MLflow UI](http://127.0.0.1:15001)
 
-The container API exposes the same `/health`, `/ready`, `/predict`, `/train`, and `/train/{job_id}` contracts described above. Ports bind to the local computer; `STEEL_ENERGY_API_PORT` and `STEEL_ENERGY_MLFLOW_PORT` can override their defaults. The existing host services on ports 8000 and 5001 can run alongside them.
+The container API exposes the same `/health`, `/ready`, `/predict`, `/train`, and `/train/{job_id}` contracts described above. Ports bind to the local computer. `STEEL_ENERGY_API_PORT` and `STEEL_ENERGY_MLFLOW_PORT` can override their defaults. A second installation on the same computer can use `docker compose -p steel-energy-demo up --build -d --wait` with distinct ports. The Compose project name scopes the image tag, containers, network, and volume.
 
 | Service | Responsibility |
 |---|---|

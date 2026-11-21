@@ -1,7 +1,7 @@
 name: steel-energy-mlops
 
 x-app: &app
-  image: steel-energy-mlops:local
+  image: ${COMPOSE_PROJECT_NAME}:local
   pull_policy: never
   init: true
   volumes:
