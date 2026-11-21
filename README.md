@@ -6,7 +6,7 @@ This project uses measurements from a South Korean steel manufacturing facility 
 
 The repository supports an MLOps semester project at Óbuda University and will also serve as a portfolio project. The coursework uses a fixed 5,000-record sample; analysis of the complete dataset is a later extension within this same repository.
 
-> **Status: local training and prediction workflow implemented.** Data preparation, model comparison, MLflow experiment tracking and registry, validation-based promotion, logged CLI predictions, and quality checks are implemented. The REST API, containerized services, and monitoring dashboard are still to be implemented. Reported model errors below are validation results; final test evaluation remains reserved.
+> **Status: local training and prediction REST API implemented.** Data preparation, model comparison, MLflow experiment tracking and registry, validation-based promotion, logged CLI/HTTP predictions, and quality checks are implemented. The training REST endpoint, containerized services, and monitoring dashboard are still to be implemented. Reported model errors below are validation results; final test evaluation remains reserved.
 
 ## Project objective
 
@@ -150,6 +150,36 @@ steel-energy train --families ridge
 
 Prediction operations record their exact timestamp request, generated features, response, and model version in MLflow. Tracking failures produce an error instead of an unrecorded successful response. Local training uses a workspace lock to prevent overlapping local promotion jobs; distributed deployment coordination remains future work.
 
+### Local prediction REST API
+
+Start the service from the project root in the activated environment:
+
+```bash
+steel-energy serve
+```
+
+The default address is `http://127.0.0.1:8000`. Open [interactive API documentation](http://127.0.0.1:8000/docs) to inspect the input/output contracts and send a prediction request. The server also accepts `--workspace`, `--model-name`, `--host`, and `--port`; model names and filesystem paths are server configuration, not request-body inputs.
+
+```bash
+curl --fail-with-body http://127.0.0.1:8000/predict \
+  -H 'Content-Type: application/json' \
+  -d '{"timestamps":["2019-01-07T10:00:00","2019-01-07T10:15:00"]}'
+```
+
+The dates demonstrate the interface; no 2019 target values are available to assess their accuracy. Successful responses contain the request ID, MLflow run ID, one explicit model version, feature contract, policy at model promotion, units (`kWh`), and one prediction per timestamp in input order. A `legacy-v1` policy is disclosed for the existing forest; readiness means the model is compatible and loadable, not that it passed the current promotion policy.
+
+| Endpoint | Purpose | Normal and failure responses |
+|---|---|---|
+| `GET /health` | HTTP liveness, independent of model availability | `200`; audit storage failure produces `503` |
+| `GET /ready` | Resolve the champion, check its contract, and load the saved model | `200` with model metadata; `503` if unavailable or incompatible |
+| `POST /predict` | Predict with one pinned model version and record the result | `200`; `422` for invalid input; `503` for model/tracking/audit failures; `500` for unexpected errors |
+
+The JSON body accepts only `timestamps`: a list of 1-1,000 ISO datetime **strings**, without a timezone and on the 15-minute grid. Empty lists, numeric dates, date-only strings, timezone offsets, nonzero seconds/microseconds, and extra fields are rejected before model access. Timestamps are canonicalized for prediction artifacts; duplicates and original input order are retained. Error responses expose a request ID and actionable error category without internal storage paths or stack traces.
+
+Every response receives a server-generated `X-Request-ID`. Application requests, including invalid input and failed predictions, append a locked JSON-lines audit record to `artifacts/mlflow/http_requests.jsonl`: UTC time, request ID, method, path, status, duration, and model/run IDs when available. Request headers and arbitrary raw payloads are not copied into the audit log. Successful predictions save canonical inputs, generated features, and the returned prediction payload in MLflow; the request ID also appears in the MLflow run tags. If HTTP audit storage fails, the application returns `503` rather than an unrecorded success. Such a failed HTTP response can follow a completed MLflow prediction run.
+
+The service uses one worker and serializes model/tracking operations within the process because fluent MLflow configuration and native thread limits are shared state. HTTP validation and liveness remain responsive during inference; integration tests exercise concurrent requests across separate model stores. This is a local serving implementation, with distributed coordination and load testing left for a later runtime stage. The training API remains pending; model training currently uses the CLI or MLflow Projects.
+
 **MLflow Projects entry points**
 
 `MLproject` exposes `prepare`, `train`, `predict`, and `evaluate`, sharing the same application functions as the CLI. For example, after the normal environment setup:
@@ -222,7 +252,7 @@ python -m pre_commit run --all-files
 
 The same checks run automatically before local commits and in GitHub Actions: Flake8 for Python files, Pyright standard mode for `src/`, pytest with branch coverage, and separate minimum 95% coverage gates for `src/` and `tests/`. No application or test files are omitted from coverage.
 
-The tests cover invalid data, chronological isolation, feature leakage, reproducible outputs, CV windows, promotion acceptance/rejection, real SQLite tracking and registry behavior, saved-model round trips, request artifacts, locking, and failure handling. Tests use synthetic observations and never train or select models using the real final evaluation data.
+The tests cover invalid data, chronological isolation, feature leakage, reproducible outputs, CV windows, promotion acceptance/rejection, real SQLite tracking and registry behavior, saved-model round trips, request artifacts, HTTP schemas and errors, audit failures, concurrent prediction isolation, locking, and failure handling. API integration tests serve saved models after removing the prepared synthetic CSVs. Tests use synthetic observations and never train or select models using the real final evaluation data.
 
 ## Implementation scope
 
@@ -233,7 +263,7 @@ The tests cover invalid data, chronological isolation, feature leakage, reproduc
 | Modeling | Train-only CV, constant and schedule-aware comparisons, validation error slices | Implemented; final test evaluation reserved |
 | Experiment tracking | MLflow Projects, artifacts, reloadable models, registry | Implemented locally |
 | Model management | Candidate comparison and promotion safeguards | Implemented locally |
-| Serving | Version-pinned, logged CLI prediction; REST endpoints | CLI implemented; REST API planned |
+| Serving | Version-pinned CLI/REST prediction, liveness/readiness, request records | Prediction API implemented locally; training REST endpoint pending |
 | Monitoring | Evidently reports displayed in Streamlit | Planned |
 | Runtime | Docker images and a single Compose startup command | Planned |
 | Quality | Tests, coverage, Flake8, Pyright, pre-commit, GitHub Actions | Implemented for current application code |
@@ -247,4 +277,4 @@ Development uses local feature branches and meaningful commits. Changes are push
 
 ## AI assistance
 
-AI assistance was used for dataset selection, sampling validation, repository organization, application code, model comparison, tracking integration, and tests. Generated changes and technical claims are checked against the source data, recorded experiments, and automated validation before being presented as completed results.
+AI assistance was used for dataset selection, sampling validation, repository organization, application code, model comparison, tracking integration, the prediction service, and tests. Generated changes and technical claims are checked against the source data, recorded experiments, and automated validation before being presented as completed results.
