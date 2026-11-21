@@ -40,6 +40,14 @@ def test_real_mlflow_artifacts_and_model_roundtrips(training_session: dict[str, 
     client, _ = open_store(session["workspace"], "steel-energy-training")
     run = client.get_run(result["run_id"])
     assert run.info.status == "FINISHED"
+    children = client.search_runs([run.info.experiment_id],
+                                  filter_string=f"tags.mlflow.parentRunId = '{result['run_id']}'")
+    assert len(children) == len(result["comparison"])
+    for child in children:
+        assert child.info.status == "FINISHED"
+        assert child.info.artifact_uri.startswith((session["workspace"] / "artifacts").as_uri() + "/")
+        trials = client.download_artifacts(child.info.run_id, "cross_validation.json")
+        assert isinstance(json.loads(Path(trials).read_text())["trials"], list)
     assert run.data.tags["test_evaluated"] == "false"
     assert run.data.tags["promotion_policy"] == PROMOTION_POLICY
     assert run.data.metrics["selected_validation_mae"] < run.data.metrics["baseline_median_validation_mae"]

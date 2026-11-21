@@ -6,7 +6,7 @@ This project uses measurements from a South Korean steel manufacturing facility 
 
 The repository supports an MLOps semester project at Óbuda University and will also serve as a portfolio project. The coursework uses a fixed 5,000-record sample; analysis of the complete dataset is a later extension within this same repository.
 
-> **Status: local training and prediction REST APIs implemented.** Data preparation, model comparison, MLflow experiment tracking and registry, validation-based promotion, asynchronous training jobs, logged CLI/HTTP predictions, and quality checks are implemented. Containerized services and the monitoring dashboard are still to be implemented. Reported model errors below are validation results; final test evaluation remains reserved.
+> **Status: training and prediction APIs packaged with Docker Compose.** Data preparation, model comparison, MLflow tracking and registry, validation-based promotion, asynchronous training jobs, logged predictions, and a persistent container runtime are implemented. The monitoring dashboard remains to be implemented. Reported model errors below are validation results; final test evaluation remains reserved.
 
 ## Project objective
 
@@ -204,6 +204,52 @@ Job state is atomically persisted in `job.json`, while the worker's result and d
 
 HTTP audit records include the training job ID and, after completion, its MLflow run ID. If HTTP audit writing fails after a job has already started, the response is `503` **with the admitted job ID and status URL**; inspect that job rather than assuming training did not start and submitting another job. The durable job record remains the admission record in this case.
 
+### Docker Compose runtime
+
+The API and MLflow UI share one application image and a named volume. Prerequisites are Docker with Compose, the fixed prepared data in `data/processed`, and an exported existing champion. CSV files and model artifacts are excluded from Git and the image, so a fresh clone needs these artifacts restored first. Shared DVC/model artifact storage is still pending.
+
+For the current local experiment store, create the portable model export once in the activated Python environment:
+
+```bash
+steel-energy export-model
+```
+
+This writes `artifacts/deployment/champion`, including the saved pipeline, file checksums, original model/run IDs, feature contract, training/validation hashes, and original promotion policy. Export refuses to overwrite an existing directory. To export a later champion, choose a new parent, for example `steel-energy export-model --output artifacts/deployment-next/champion`, and set `STEEL_ENERGY_MODEL_SEEDS=./artifacts/deployment-next` for Compose. If no champion exists, export fails; a candidate must first qualify through normal training and promotion.
+
+With those prerequisites available, start the container services with one command:
+
+```bash
+docker compose up --build -d --wait
+```
+
+- [Container API and interactive documentation](http://127.0.0.1:18000/docs)
+- [Container MLflow UI](http://127.0.0.1:15001)
+
+The container API exposes the same `/health`, `/ready`, `/predict`, `/train`, and `/train/{job_id}` contracts described above. Ports bind to the local computer; `STEEL_ENERGY_API_PORT` and `STEEL_ENERGY_MLFLOW_PORT` can override their defaults. The existing host services on ports 8000 and 5001 can run alongside them.
+
+| Service | Responsibility |
+|---|---|
+| `volume-init` | One-shot ownership setup for the application volume |
+| `initialize` | Verify and copy prepared train/validation files, then restore the exported champion if none exists |
+| `api` | Serve predictions and isolated asynchronous training jobs as user 10001 |
+| `mlflow` | Display the container experiment store and registry as user 10001 |
+
+Initialization mounts the host's prepared data and model export read-only. It copies only `train.csv`, `validation.csv`, and `manifest.json`; the final test CSV is neither copied nor opened. Copying the existing files preserves the exact hashes used by the model: recomputing trigonometric features on a different operating system can change the last floating-point digit and therefore the CSV checksum. Feature values, file checksums, source cohort size, training cutoff, and model provenance are checked before accepting runtime data. Changed inputs fail initialization without overwriting an existing valid runtime dataset.
+
+The portable export transfers the **existing champion only**, rather than the entire host experiment history. Initialization reloads that fitted pipeline and records a restoration run in the separate container registry, preserving the original promotion policy and source version/run IDs. It does not retrain or award a new policy approval. The current forest therefore remains `legacy-v1`; subsequent `/train` jobs must pass `calendar-reference-v2` to replace it. Runtime registry version numbers belong to the new store and may differ from host version numbers.
+
+The named volume `steel-energy-mlops_runtime` holds prepared training data, the SQLite database, models, prediction artifacts, HTTP audit records, and training-job results. API and UI use the same `/runtime` path so stored artifact locations remain valid in both containers. Restart initialization validates the data against the existing champion and retains that champion without importing another model version. Host artifacts and the host SQLite store are separate.
+
+```bash
+docker compose ps --all
+docker compose logs --tail 50 api mlflow initialize
+docker compose down
+```
+
+`down` removes this project's containers and network while retaining its named volume. Starting again restores access to persisted models and completed jobs. Adding `--volumes` would delete that state. API shutdown allows up to 120 seconds for its worker to finish; an interrupted job can be reconciled from its durable record after startup.
+
+The image uses a digest-pinned Python 3.12 base and the pinned application dependencies. Only the one-shot volume ownership service runs as root. This is a local, single-host SQLite deployment with one API worker and one admitted training job; distributed coordination, a shared artifact store, and the monitoring services remain future work.
+
 **MLflow Projects entry points**
 
 `MLproject` exposes `prepare`, `train`, `predict`, and `evaluate`, sharing the same application functions as the CLI. For example, after the normal environment setup:
@@ -237,6 +283,8 @@ steel-energy-mlops/
 ├── dvc.yaml / dvc.lock      # Reproducible preparation stage and artifact hashes
 ├── pyproject.toml           # Package, CLI, pytest, coverage, and Pyright configuration
 ├── MLproject                # Shared prepare/train/predict/evaluate entry points
+├── Dockerfile / .dockerignore # Application image and restricted build context
+├── compose.yaml             # Initialization, API, MLflow UI, and persistent volume
 ├── requirements.txt         # Pinned modeling dependencies
 ├── requirements-dev.txt     # Pinned development tools
 └── README.md
@@ -276,7 +324,7 @@ python -m pre_commit run --all-files
 
 The same checks run automatically before local commits and in GitHub Actions: Flake8 for Python files, Pyright standard mode for `src/`, pytest with branch coverage, and separate minimum 95% coverage gates for `src/` and `tests/`. No application or test files are omitted from coverage.
 
-The tests cover invalid data, chronological isolation, feature leakage, reproducible outputs, CV windows, promotion acceptance/rejection, real SQLite tracking and registry behavior, saved-model round trips, request artifacts, HTTP schemas and errors, audit failures, concurrent prediction isolation, isolated training subprocesses, immutable training snapshots, duplicate admission, persisted job recovery, and failure handling. Prediction integration tests serve saved models after removing the prepared synthetic CSVs. Training API integration tests remove the final test CSV before starting any job. Tests use synthetic observations and never train or select models using the real final evaluation data.
+The tests cover invalid data, chronological isolation, feature leakage, reproducible outputs, CV windows, promotion acceptance/rejection, real SQLite tracking and registry behavior, saved-model round trips, request artifacts, HTTP schemas and errors, audit failures, concurrent prediction isolation, isolated training subprocesses, immutable training snapshots, duplicate admission, persisted job recovery, portable model restoration, initialization idempotency, data/artifact tampering, and failure handling. Prediction integration tests serve saved models after removing the prepared synthetic CSVs. Training API and runtime integration tests remove the final test CSV before execution. Tests use synthetic observations and never train or select models using the real final evaluation data.
 
 ## Implementation scope
 
@@ -289,11 +337,11 @@ The tests cover invalid data, chronological isolation, feature leakage, reproduc
 | Model management | Candidate comparison and promotion safeguards | Implemented locally |
 | Serving | Version-pinned prediction, isolated training jobs, status queries, request records | Training and prediction APIs implemented locally |
 | Monitoring | Evidently reports displayed in Streamlit | Planned |
-| Runtime | Docker images and a single Compose startup command | Planned |
+| Runtime | Docker image, single Compose startup, persistent model/data/job state | Implemented locally for API and MLflow; monitoring services pending |
 | Quality | Tests, coverage, Flake8, Pyright, pre-commit, GitHub Actions | Implemented for current application code |
 | Optional extension | Airflow orchestration and full-dataset analysis | Planned |
 
-The implemented application must maintain separate 95% coverage gates for source and test code, Pyright standard mode, and Flake8 compliance. REST, container builds, and monitoring require their own implementation and validation as they are added.
+The implemented application must maintain separate 95% coverage gates for source and test code, Pyright standard mode, and Flake8 compliance. Container startup, HTTP training/prediction, and state retention are checked against the running local stack. Monitoring requires its own implementation and validation when added.
 
 ## Development workflow
 

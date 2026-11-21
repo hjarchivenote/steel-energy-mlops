@@ -18,6 +18,7 @@ from steel_energy_mlops.modeling import LEARNED_FAMILIES
 from steel_energy_mlops.prediction import predict_consumption
 from steel_energy_mlops.preparation import prepare_dataset
 from steel_energy_mlops.promotion import MINIMUM_IMPROVEMENT
+from steel_energy_mlops.runtime import export_champion, initialize_runtime
 from steel_energy_mlops.tracking import DEFAULT_MODEL, DEFAULT_WORKSPACE
 from steel_energy_mlops.training import train_models
 
@@ -61,6 +62,17 @@ def main(arguments: Sequence[str] | None = None) -> int:
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=_port, default=8000)
     serve.add_argument("--data", type=Path, default=Path("data/processed"))
+    export = commands.add_parser("export-model", help="Export the existing champion as a portable model seed")
+    export.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
+    export.add_argument("--model-name", default=DEFAULT_MODEL)
+    export.add_argument("--output", type=Path, default=Path("artifacts/deployment/champion"))
+    initialize = commands.add_parser("init-runtime", help="Copy prepared data and restore an existing model seed")
+    initialize.add_argument("--prepared-data", type=Path, required=True)
+    initialize.add_argument("--data", type=Path, required=True)
+    initialize.add_argument("--workspace", type=Path, required=True)
+    initialize.add_argument("--model-seed", type=Path, required=True)
+    initialize.add_argument("--model-name", default=DEFAULT_MODEL)
+    initialize.add_argument("--expected-rows", type=int, default=5000)
     args = parser.parse_args(arguments)
     try:
         if args.command == "prepare-data":
@@ -76,11 +88,17 @@ def main(arguments: Sequence[str] | None = None) -> int:
             uvicorn.run(create_app(args.workspace, args.model_name, args.data),
                         host=args.host, port=args.port, workers=1)
             return 0
+        elif args.command == "export-model":
+            result = export_champion(args.workspace, args.output, args.model_name)
+        elif args.command == "init-runtime":
+            result = initialize_runtime(args.prepared_data, args.data, args.workspace, args.model_seed,
+                                        args.model_name, args.expected_rows)
         else:
             result = predict_consumption(tuple(args.timestamp), args.workspace, args.model_name)
     except (DataValidationError, ValueError, OSError, UnicodeError, csv.Error, MlflowException) as exc:
         operations = {"prepare-data": "Data preparation", "train": "Model training", "predict": "Prediction",
-                      "evaluate": "Validation diagnostics", "serve": "API startup"}
+                      "evaluate": "Validation diagnostics", "serve": "API startup",
+                      "export-model": "Model export", "init-runtime": "Runtime initialization"}
         operation = operations[args.command]
         print(f"{operation} failed: {exc}", file=sys.stderr)
         return 2

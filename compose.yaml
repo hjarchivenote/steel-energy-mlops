@@ -1,0 +1,83 @@
+name: steel-energy-mlops
+
+x-app: &app
+  image: steel-energy-mlops:local
+  pull_policy: never
+  init: true
+  volumes:
+    - runtime:/runtime
+
+services:
+  volume-init:
+    <<: *app
+    user: "0:0"
+    entrypoint: ["python", "-c", "import os; os.chown('/runtime', 10001, 10001)"]
+    restart: "no"
+
+  initialize:
+    <<: *app
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+    command:
+      - init-runtime
+      - --prepared-data
+      - /input
+      - --data
+      - /runtime/data/processed
+      - --workspace
+      - /runtime/mlflow
+      - --model-seed
+      - /seed/champion
+    volumes:
+      - runtime:/runtime
+      - type: bind
+        source: ./data/processed
+        target: /input
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${STEEL_ENERGY_MODEL_SEEDS:-./artifacts/deployment}
+        target: /seed
+        read_only: true
+        bind:
+          create_host_path: false
+    restart: "no"
+
+  api:
+    <<: *app
+    build: .
+    depends_on:
+      initialize:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${STEEL_ENERGY_API_PORT:-18000}:8000"
+    stop_grace_period: 120s
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/ready', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      start_period: 30s
+      retries: 6
+    restart: unless-stopped
+
+  mlflow:
+    <<: *app
+    depends_on:
+      initialize:
+        condition: service_completed_successfully
+    entrypoint: ["mlflow"]
+    command: ["ui", "--backend-store-uri", "sqlite:////runtime/mlflow/mlflow.db", "--host", "0.0.0.0", "--port", "5000", "--workers", "1"]
+    ports:
+      - "127.0.0.1:${STEEL_ENERGY_MLFLOW_PORT:-15001}:5000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:5000/health', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      start_period: 30s
+      retries: 6
+    restart: unless-stopped
+
+volumes:
+  runtime:

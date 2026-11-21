@@ -105,7 +105,7 @@ def _train_locked(
         metrics: dict[str, ErrorMetrics] = {}
         models: dict[str, str] = {}
         for candidate in candidates:
-            with mlflow.start_run(run_name=candidate.name, nested=True):
+            with mlflow.start_run(experiment_id=experiment_id, run_name=candidate.name, nested=True):
                 predictions = np.asarray(candidate.model.predict(data.validation.features), dtype=np.float64)
                 result = error_metrics(data.validation.target, predictions)
                 metrics[candidate.name] = result
