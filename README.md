@@ -4,7 +4,7 @@
 
 This project uses measurements from a South Korean steel manufacturing facility to estimate electricity consumption (`Usage_kWh`). It connects my manufacturing experience with practical machine learning engineering: tracking experiments, validating model changes, serving predictions, and monitoring changes in incoming data.
 
-The repository supports an MLOps semester project at Óbuda University and will also serve as a portfolio project. The coursework uses a fixed 5,000-record sample; analysis of the complete dataset is a later extension within this same repository.
+The repository supports an MLOps semester project at Óbuda University and will also serve as a portfolio project. The coursework uses a fixed 5,000-record target sample. A separate offline forecast experiment supplements it with earlier measurements from the original continuous source; it does not expand the target cohort or change its partitions.
 
 > **Status: training, prediction, and monitoring packaged with Docker Compose.** Data preparation, model comparison, MLflow tracking and registry, validation-based promotion, asynchronous training jobs, logged predictions, a persistent container runtime, and version-scoped Evidently reports displayed in Streamlit are implemented locally. Reported model errors below are validation results; final test evaluation remains reserved.
 
@@ -77,7 +77,31 @@ Only 14.2% of successive training observations are exactly 15 minutes apart. Und
 
 A same-row calculation using lagging reactive energy and power factor approximately reconstructs the target, with a median absolute difference of 0.0010 kWh among 2,786 eligible training rows. CO₂ has a training-target correlation of 0.991 and ambiguous units. These diagnostics motivate excluding same-row electrical measurements and CO₂. `Load_Type` remains excluded pending evidence of its derivation and availability before the forecast.
 
-MLflow records the input decisions, source hashes and timestamps for the candidate training features. The next evaluation requires a rolling backtest against the calendar reference and a forecast that repeats the latest available consumption reading. Candidate adoption depends on performance under the declared availability rule, including high-usage errors. The current results below describe the calendar model.
+MLflow records the input decisions, source hashes and timestamps for the candidate training features. The continuous-history experiment below now compares this input design with the calendar reference and a forecast that repeats the latest available consumption reading. The deployed service continues to use the calendar model.
+
+### Continuous history: frozen offline validation
+
+The fixed 5,000 targets and their train/validation/test boundaries remain unchanged. Original measurements supplement **past context only**. The experiment assumes a 15-minute reporting delay and predicts 15 minutes after the forecast origin, so a normal prediction uses measurements from 30 minutes before its target. Arrival times are simulated, not measured by UCI. Earlier observations from the validation period may supply later forecasts only after their declared arrival; the model is never refitted on validation labels.
+
+The original file places each date's `00:00` row after its `23:45` row. The file does not resolve the measurement-time interpretation. Midnight measurements are therefore excluded from history and fitting; their dates are never shifted. All evaluation targets are retained, and midnight requests use the same calendar-forest fallback for every comparison, with no short-horizon forecasting claim for those requests. Training fits 3,457 non-midnight labels; validation retains all 750 targets, including nine common-fallback targets.
+
+Seven configurations were screened using three expanding windows inside the training partition, purging labels not available at each window's first forecast origin. Before fitting, acceptance required at least 1% lower MAE than **both** the matched calendar forest and latest-usage persistence, no worse RMSE/P95/high-usage MAE, and at least 10% lower absolute high-usage bias than both controls. The high-usage threshold is computed from each training window only. Among eligible candidates, squared-error histogram boosting had the lowest mean CV MAE (7.3297 kWh versus persistence 8.6731). Its configuration was then frozen for one check on the existing validation partition; no validation search was performed.
+
+| Fixed validation, 750 targets | MAE (kWh) | RMSE (kWh) | P95 absolute error (kWh) | High-usage MAE (kWh) | High-usage signed bias (kWh) |
+|---|---:|---:|---:|---:|---:|
+| Matched calendar forest | 10.0739 | 19.4556 | 49.1754 | 21.8321 | -14.2442 |
+| Latest available usage | 7.8716 | 17.3429 | 39.3100 | 20.8091 | -11.3837 |
+| Frozen history candidate | **6.7300** | **13.0324** | **29.1749** | **17.3278** | **-3.7196** |
+
+All predeclared checks pass. MAE is 14.5% lower than persistence and 33.2% lower than the matched calendar control. The candidate also improves MAE over persistence in both temporal halves (5.8777 versus 6.5711, and 7.5823 versus 9.1722). High usage means more than the training-only Q75 of 54.22 kWh, covering 140 validation targets. This matched calendar control excludes midnight fitting labels, so its score differs from the deployed calendar model's 9.9241 kWh. These results use additional past measurements and support continuing the forecast work; they do not establish statistical significance, energy savings, or performance under a different arrival delay.
+
+Machine-readable [selection](experiments/history_15min/selection.json) and [validation](experiments/history_15min/validation.json) snapshots preserve the frozen plans, hashes, all screened candidates and acceptance checks. The original source and availability/prediction traces are stored in MLflow experiment `steel-energy-dense-history-screen`: selection run `5fc6a173bd9c4d3b8bc6c2e8b603e030`, validation run `3ff1b50d2cc74358b0ef5889e89039b4`. With the original source and prepared data restored, replay the frozen validation without tuning:
+
+```bash
+python experiments/history_15min/replay_validation.py
+```
+
+The replay verifies original, training and validation hashes, logs to a separate local store, and never opens the final test CSV or registers a model. Tests use synthetic data to check availability, midnight fallback, future-value isolation, target integrity and rejection of unavailable labels. The running API, champion and monitoring still use the calendar contract. The next implementation step is an explicit forecast request contract with historical observations, arrival-time validation and fallback behavior before any deployment decision. The final test remains unscored.
 
 ## Model comparison and practical meaning
 
@@ -236,7 +260,7 @@ curl --fail-with-body http://127.0.0.1:8000/train \
 
 An empty JSON object uses those defaults. The response is `202 Accepted` and contains `job_id`, `training_request_id`, and `status_url`; its `Location` header points to the same status URL. Query that URL, for example `GET /train/<job_id>`, until `status` becomes `succeeded`, `failed`, or `interrupted`. While training runs, status is `running`; percentage progress is not estimated. Each status query has its own request ID while retaining the original training request ID.
 
-The training options are bounded: one to three unique supported families, 1-500 forest trees, an improvement threshold in `[0.01, 1)`, and an integer seed in `[0, 2**32-1]`. Numeric strings, booleans in integer fields, extra fields, client-provided paths, target values, and model names are rejected. The endpoint keeps the existing train-only model selection and `calendar-reference-v2` promotion policy.
+The training options are bounded: one to three unique supported families, 1-500 forest trees, an improvement threshold in `[0.01, 1)`, and an integer seed in `[0, 2**32-1]`. Numeric strings, booleans in integer fields, extra fields, client-provided paths, target values, and model names are rejected. The endpoint keeps train-only model selection and applies the prospective `calendar-reference-v3` promotion policy described above.
 
 `succeeded` means training and result recording completed. The returned `result.promoted` separately reports whether the champion changed; `false` includes the rejection reason and every comparison. Failed workers record an error category and exit code. Detailed worker output stays in the local job directory rather than being exposed as a server traceback.
 
