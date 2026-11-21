@@ -368,6 +368,16 @@ python -m pre_commit run --all-files
 
 The same checks run automatically before local commits and in GitHub Actions: Flake8 for Python files, Pyright standard mode for `src/`, pytest with branch coverage, and separate minimum 95% coverage gates for `src/` and `tests/`. No application or test files are omitted from coverage.
 
+Changes to runtime source, Docker configuration, dependencies, or the integration-test fixtures also trigger a Compose smoke test in pre-commit. GitHub Actions runs it through the same hooks. The test generates 5,000 synthetic observations, trains and exports a Ridge model, builds the application image, and starts the API and MLflow with a new volume and dynamically assigned local ports. It verifies model readiness, non-root execution, prediction values, recorded prediction artifacts, and completion of a training request that retains the incumbent. The test cleans up its project containers, volume, network, and image.
+
+Run this check directly with Docker and Compose available in the activated development environment.
+
+```bash
+python -m coverage run --append -m pytest tests/test_docker_smoke.py --run-docker -q
+```
+
+Ordinary pytest runs skip this integration test until `--run-docker` is supplied. The hook appends its execution to the unit-test coverage before checking both coverage gates. `STEEL_ENERGY_PREPARED_DATA` selects the prepared-data directory for the generated fixture.
+
 The tests cover invalid data, chronological isolation, feature leakage, reproducible outputs, CV windows, promotion acceptance/rejection, real SQLite tracking and registry behavior, saved-model round trips, request artifacts, HTTP schemas and errors, audit failures, concurrent prediction isolation, isolated training subprocesses, immutable training snapshots, duplicate admission, persisted job recovery, portable model restoration, initialization idempotency, data/artifact tampering, and failure handling. Prediction integration tests serve saved models after removing the prepared synthetic CSVs. Training API and runtime integration tests remove the final test CSV before execution. Tests use synthetic observations and never train or select models using the real final evaluation data.
 
 ## Implementation scope

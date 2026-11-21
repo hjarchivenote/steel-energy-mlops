@@ -32,7 +32,7 @@ services:
     volumes:
       - runtime:/runtime
       - type: bind
-        source: ./data/processed
+        source: ${STEEL_ENERGY_PREPARED_DATA:-./data/processed}
         target: /input
         read_only: true
         bind:

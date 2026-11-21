@@ -33,14 +33,14 @@ def write_csv(path: Path, rows: list[list[str]], header: tuple[str, ...] = SOURC
     return path
 
 
-def make_training_data(directory: Path) -> Path:
+def make_training_data(directory: Path, record_count: int = 160) -> Path:
     rows = []
-    for index in range(160):
+    for index in range(record_count):
         timestamp = datetime(2018, 1, 1) + timedelta(minutes=15 * index)
         phase = math.tau * (index % 96) / 96
         usage = (8 + 2 * math.sin(phase) + math.cos(phase)) ** 2
         rows.append(make_row(timestamp, usage))
     source = write_csv(directory / "training_source.csv", rows)
     prepared = directory / "prepared"
-    prepare_dataset(source, prepared, expected_rows=160)
+    prepare_dataset(source, prepared, expected_rows=record_count)
     return prepared

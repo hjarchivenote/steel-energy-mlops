@@ -1,0 +1,85 @@
+"""Exercise the shipped image and Compose stack with isolated, generated data and model state."""
+
+import json
+import os
+import subprocess
+import time
+from datetime import datetime
+from pathlib import Path
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+from uuid import uuid4
+
+import numpy as np
+import pytest
+from mlflow.sklearn import load_model
+
+from steel_energy_mlops.features import calendar_features
+from steel_energy_mlops.runtime import export_champion
+from steel_energy_mlops.training import train_models
+from tests.helpers import make_training_data
+
+
+def test_compose_build_restore_predict_and_train(tmp_path, pytestconfig, monkeypatch) -> None:
+    if not pytestconfig.getoption("--run-docker"):
+        pytest.skip("Run with --run-docker to build and check the Compose services.")
+    for name in ("MLFLOW_RUN_ID", "MLFLOW_EXPERIMENT_ID", "MLFLOW_EXPERIMENT_NAME"):
+        monkeypatch.delenv(name, raising=False)
+    directory = make_training_data(tmp_path, record_count=5000)
+    (directory / "test.csv").unlink()
+    workspace = tmp_path / "tracking"
+    assert train_models(directory, workspace, families=("ridge",))["promoted"]
+    seeds = tmp_path / "seeds"
+    export_champion(workspace, seeds / "champion")
+    model = load_model(str(seeds / "champion/model"))
+    stamps = ["2019-01-07T10:00:00", "2019-01-07T10:15:00"]
+    expected = model.predict(np.asarray([calendar_features(datetime.fromisoformat(stamp)) for stamp in stamps]))
+    project = "steel-energy-smoke-" + uuid4().hex[:12]
+    environment = {key: value for key, value in os.environ.items()
+                   if key not in ("COMPOSE_FILE", "COMPOSE_PROJECT_NAME", "COMPOSE_PROFILES")}
+    environment.update(STEEL_ENERGY_PREPARED_DATA=str(directory), STEEL_ENERGY_MODEL_SEEDS=str(seeds),
+                       STEEL_ENERGY_API_PORT="0", STEEL_ENERGY_MLFLOW_PORT="0")
+
+    def compose(*arguments, check=True):
+        completed = subprocess.run(["docker", "compose", "-p", project, *arguments],
+                                   cwd=Path(__file__).resolve().parents[1], env=environment,
+                                   text=True, capture_output=True, timeout=600)
+        if check:
+            assert completed.returncode == 0, completed.stdout + completed.stderr
+        return completed
+
+    def request(url, payload=None):
+        data = None if payload is None else json.dumps(payload).encode()
+        with urlopen(Request(url, data=data, headers={"Content-Type": "application/json"}), timeout=20) as response:
+            return response.status, json.load(response)
+
+    try:
+        compose("up", "--build", "-d", "--wait", "--wait-timeout", "180")
+        api = "http://" + compose("port", "api", "8000").stdout.strip()
+        ui = "http://" + compose("port", "mlflow", "5000").stdout.strip()
+        assert request(api + "/health")[1]["status"] == "ok"
+        ready = request(api + "/ready")[1]
+        assert ready["model_version"] == "1" and ready["promotion_policy"] == "calendar-reference-v2"
+        assert compose("exec", "-T", "api", "id", "-u").stdout.strip() == "10001"
+        with urlopen(ui + "/health", timeout=20) as response:
+            assert response.status == 200
+        prediction = request(api + "/predict", {"timestamps": stamps})[1]
+        np.testing.assert_allclose([point["usage_kwh"] for point in prediction["predictions"]], expected,
+                                   rtol=0, atol=1e-8)
+        artifact = ui + "/get-artifact?" + urlencode({"run_id": prediction["run_id"], "path": "response.json"})
+        assert request(artifact)[1] == prediction
+        status, admission = request(api + "/train", {"families": ["ridge"]})
+        assert status == 202
+        job = request(api + admission["status_url"])[1]
+        deadline = time.monotonic() + 90
+        while job["status"] == "running" and time.monotonic() < deadline:
+            time.sleep(1)
+            job = request(api + admission["status_url"])[1]
+        assert job["status"] == "succeeded", job
+        assert job["result"]["test_evaluated"] is False and job["result"]["promoted"] is False
+        assert request(api + "/ready")[1]["model_version"] == ready["model_version"]
+    finally:
+        logs = compose("logs", "--no-color", "--tail", "100", check=False)
+        print(logs.stdout, logs.stderr)
+        cleanup = compose("down", "--volumes", "--rmi", "all", check=False)
+        assert cleanup.returncode == 0, cleanup.stdout + cleanup.stderr

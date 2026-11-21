@@ -19,6 +19,12 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+      - id: docker-smoke
+        name: Docker Compose build and HTTP smoke test
+        entry: python -m coverage run --append -m pytest tests/test_docker_smoke.py --run-docker -q
+        language: system
+        pass_filenames: false
+        files: '^(Dockerfile|compose\.yaml|\.dockerignore|\.pre-commit-config\.yaml|\.github/workflows/.*|requirements.*\.txt|pyproject\.toml|src/.*\.py|tests/(helpers|conftest|test_docker_smoke)\.py)$'
       - id: source-coverage
         name: Source coverage >= 95%
         entry: python -m coverage report --include=src/* --fail-under=95

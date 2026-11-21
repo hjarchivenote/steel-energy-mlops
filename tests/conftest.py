@@ -6,6 +6,11 @@ import pytest
 from tests.helpers import make_row, make_training_data, write_csv
 
 
+def pytest_addoption(parser):
+    parser.addoption("--run-docker", action="store_true", default=False,
+                     help="Build and exercise an isolated Docker Compose stack with synthetic fixtures")
+
+
 @pytest.fixture
 def dataset_path(tmp_path: Path) -> Path:
     start = datetime(2018, 1, 1)
