@@ -75,7 +75,7 @@ The first experiment uses the fixed coursework sample, seed 42, and the same sev
 | **Random forest** | **11.45** | **10.58** | **19.65** |
 | Histogram gradient boosting, Poisson loss | 12.39 | 11.26 | 20.31 |
 
-The selected random forest uses 100 trees, maximum depth 6, and minimum leaf size 2. The bounded search evaluates 13 configurations across the two trivial baselines and three learned families. Selection is based on training CV MAE, not on choosing the best-looking validation or final test result.
+The initial selected random forest used squared-error splits, 100 trees, maximum depth 6, and minimum leaf size 2. That initial bounded search evaluated 13 configurations across the two trivial baselines and three learned families. Selection is based on training CV MAE, not on choosing the best-looking validation or final test result.
 
 On the separate 750-row validation partition, random forest's MAE is approximately **48.6% lower than the better of the two constant baselines**, and 62.0% lower than the mean baseline. An MAE of 10.58 kWh means an average absolute error of that size per observation in this validation period. The higher RMSE highlights the importance of larger errors. The schedule-aware comparison below places this improvement in context. These results do not demonstrate energy savings, performance at another facility, or accuracy on future operating regimes. The final 750 test records have not been scored by the training or diagnostics workflows.
 
@@ -91,15 +91,35 @@ Run `steel-energy evaluate` after preparation and initial training. This compare
 | Weekday/hour mean | 16.16 | 12.99 | 21.28 | 51.67 |
 | Weekday/hour median, CV-selected reference | 13.64 | **10.37** | 20.81 | 53.68 |
 
-The forest **does not beat the schedule median on validation MAE**: its error is 0.207 kWh higher per observation, although its RMSE and 95th-percentile absolute error are lower. The forest remains the winner under the original training-CV selection rule. These descriptive validation differences do not establish statistical significance or justify silently changing the selected model after seeing validation results. The 48.6% improvement over a constant median does not demonstrate incremental MAE value over a schedule-aware reference.
+The original squared-error forest **does not beat the schedule median on validation MAE**: its error is 0.207 kWh higher per observation, although its RMSE and 95th-percentile absolute error are lower. It was the winner under the original training-CV selection rule. These descriptive validation differences do not establish statistical significance or justify silently changing the selected model after seeing validation results. The 48.6% improvement over a constant median does not demonstrate incremental MAE value over a schedule-aware reference.
 
-The first experiments used a gate against constant baselines and the incumbent. After these diagnostics, promotion was explicitly revised to **`calendar-reference-v2`**: a candidate must improve MAE by at least 1% and have no greater RMSE against **each** of the four fixed references (constant mean/median and weekday/hour mean/median), plus the incumbent when present. MAE remains primary and RMSE acts as a guard against worse large errors. The diagnostic command itself does not register models or change the serving alias. Existing version 1 remains available as a legacy model; it has not been certified under the revised policy.
+The first experiments used a gate against constant baselines and the incumbent. After these diagnostics, promotion was explicitly revised to **`calendar-reference-v2`**: a candidate must improve MAE by at least 1% and have no greater RMSE against **each** of the four fixed references (constant mean/median and weekday/hour mean/median), plus the incumbent when present. MAE remains primary and RMSE acts as a guard against worse large errors. The diagnostic command itself does not register models or change the serving alias. Version 1 remains stored as a legacy model without retrospective certification; the later MAE-aligned champion is described below.
 
 The observed high-consumption band, defined as actual usage above the **training** 75th percentile of 53.97 kWh, contains 144 validation observations. The forest's MAE in this band is **22.10 kWh**, and its average signed error is **-11.61 kWh** (prediction minus actual): it underestimates this band on average. Across all validation observations, its largest absolute error is 80.67 kWh. These cases warrant investigation; calendar inputs alone cannot identify their operational cause.
 
 Each diagnostic run records a machine-readable summary, all validation predictions, the 20 largest champion errors, and error slices by hour, weekday, weekday/weekend, month, date, and observed usage band in the local `steel-energy-diagnostics` MLflow experiment. Every slice includes its observation count, MAE, RMSE, signed bias, 95th-percentile and maximum absolute error. The lower and upper usage cutoffs are fitted on training targets only. Observed usage bands require known targets and are **offline diagnostics**, not prediction inputs or online alert rules. Date groups contain sampled observations, not complete daily energy totals; small groups are descriptive rather than reliable rankings.
 
 Diagnostics verify that the champion's feature contract, training/validation hashes, and training cutoff match the fixed evaluation data. They save the preparation manifest and application source alongside the results, never open the final test partition, and leave both registry versions and the serving alias unchanged.
+
+### MAE-aligned model improvement
+
+The next accepted change aligns forest training with the primary metric. The current search compares `squared_error` and `absolute_error` criteria inside the same chronological training CV. Absolute-error trees use median leaf estimates. Both criteria retain the original depth `[6, None]` and leaf-size `[2, 8]` grid, seed 42, 100 trees, and seven calendar inputs. The full search now contains 17 configurations across the same five model families, including the two constant baselines. No additional source measurements or lagged targets are introduced.
+
+Before inspecting the new candidate's fixed validation results, its training-CV MAE had to improve by at least 1% over the best squared-error control. The selected absolute-error forest reduced CV MAE from **11.45 to 10.87 kWh**, an improvement of approximately **5.1%**. Depth 6 and leaf size 2 were selected by CV; the original promotion thresholds were retained.
+
+| Model | Validation MAE (kWh) | Validation RMSE (kWh) |
+|---|---:|---:|
+| Previous squared-error champion | 10.5807 | 19.6482 |
+| Weekday/hour median reference | 10.3739 | 20.8081 |
+| **New absolute-error forest** | **9.9233** | **19.1692** |
+
+The new forest reduces validation MAE by **6.2%** against the previous champion and **4.3%** against the schedule median, while reducing RMSE by **2.4%** against the previous champion. It clears **every** unchanged `calendar-reference-v2` MAE and RMSE check and becomes host registry champion version **7**. Reproducing the same fixed search through the Docker training API also passes every gate and promotes container version **3**, with MAE **9.9241** and RMSE **19.1703 kWh**. These separately fitted models have small platform-dependent numerical differences; their registry version numbers belong to separate stores.
+
+There is an observed error trade-off. The validation 95th-percentile absolute error increases from **44.99 to 48.83 kWh**, while the maximum absolute error decreases from **80.67 to 76.95 kWh**. In the same 144-observation high-usage band, MAE improves from **22.10 to 21.27 kWh**, but signed bias becomes more negative (**-11.61 to -14.37 kWh**). The model passes the pre-existing MAE/RMSE gate and improves average consumption estimates; high-usage underestimation remains a limitation for peak-related decisions. No threshold is changed after seeing these diagnostics.
+
+The training-only screen, all eight forest trials, selected parameters, promotion comparisons, source snapshots, data hashes, and validation predictions are recorded in MLflow. The screen run is linked from the accepted training run. A prior median-schedule residual-correction experiment was rejected at training CV (13.38 versus the forest control's 11.45 kWh); it never progressed to fixed-validation scoring or a registry change.
+
+These are validation improvements following earlier validation diagnostics, rather than a new untouched estimate or a statistical significance claim. The final test partition remains reserved. Calendar-only estimates still cannot explain unplanned operating changes or establish actual energy savings.
 
 ## Training, registry, and prediction
 
@@ -126,7 +146,7 @@ Each training operation records:
 - The selected candidate's registry version, promotion policy version, and a machine-readable decision. Every selected candidate is retained, including rejected ones. `promotion_decision.json` records every reference's errors, allowed limits, and both pass/fail checks; the first failed check supplies the concise rejection reason.
 - Train-only weekday/hour reference predictions, their validation errors, and fallback counts. These deterministic references are mandatory checks, not additional selectable learned candidates.
 
-Ridge uses a square-root target with a square inverse transformation; random forests average non-negative targets; boosted trees use a Poisson loss. The workflow checks all outputs for finite, non-negative consumption values. No final test targets are loaded by training or candidate selection.
+Ridge uses a square-root target with a square inverse transformation; random forests aggregate non-negative mean or median leaf estimates; boosted trees use a Poisson loss. The workflow checks all outputs for finite, non-negative consumption values. No final test targets are loaded by training or candidate selection.
 
 **Current promotion policy: `calendar-reference-v2`**
 
@@ -138,7 +158,7 @@ Ridge uses a square-root target with a square inverse transformation; random for
 
 The original constant-baseline policy was fixed before the first real experiment; version 2 is an explicit revision following validation diagnostics, not a claim that this stronger rule was predeclared. Each new run and candidate version records its policy ID and threshold. Existing untagged champions are reported as `legacy-v1` and remain available until a new candidate passes; the code does not retroactively mark them as version-2 approvals.
 
-Under version 2, the observed schedule-median MAE of 10.3739 kWh requires candidate MAE of at most **10.270161 kWh**, together with all other checks. The unchanged forest's 10.5807 kWh therefore does not qualify for a new promotion. A first candidate may also be registered without receiving a `champion` alias; subsequent training can retry normally, and prediction reports that no validated champion is available.
+Under version 2, the observed schedule-median MAE of 10.3739 kWh requires candidate MAE of at most **10.270161 kWh**, together with all other checks. The original squared-error forest's 10.5807 kWh therefore does not qualify for a new promotion; the MAE-aligned forest's 9.9233 kWh clears this limit and all remaining checks. A first candidate may also be registered without receiving a `champion` alias; subsequent training can retry normally, and prediction reports that no validated champion is available.
 
 The 1% threshold is an operational gate, not a statistical significance claim or a guarantee of future performance. Repeated experimentation must not turn the fixed validation partition into an unlimited tuning set. The untouched final test partition is reserved for the eventual final assessment.
 
@@ -166,7 +186,7 @@ curl --fail-with-body http://127.0.0.1:8000/predict \
   -d '{"timestamps":["2019-01-07T10:00:00","2019-01-07T10:15:00"]}'
 ```
 
-The dates demonstrate the interface; no 2019 target values are available to assess their accuracy. Successful responses contain the request ID, MLflow run ID, one explicit model version, feature contract, policy at model promotion, units (`kWh`), and one prediction per timestamp in input order. A `legacy-v1` policy is disclosed for the existing forest; readiness means the model is compatible and loadable, not that it passed the current promotion policy.
+The dates demonstrate the interface; no 2019 target values are available to assess their accuracy. Successful responses contain the request ID, MLflow run ID, one explicit model version, feature contract, policy at model promotion, units (`kWh`), and one prediction per timestamp in input order. The MAE-aligned champion reports `calendar-reference-v2`; older untagged models disclose `legacy-v1`. Readiness checks compatibility and loadability, so its policy field must also be inspected when assessing approval status.
 
 | Endpoint | Purpose | Normal and failure responses |
 |---|---|---|
@@ -236,7 +256,7 @@ The container API exposes the same `/health`, `/ready`, `/predict`, `/train`, an
 
 Initialization mounts the host's prepared data and model export read-only. It copies only `train.csv`, `validation.csv`, and `manifest.json`; the final test CSV is neither copied nor opened. Copying the existing files preserves the exact hashes used by the model: recomputing trigonometric features on a different operating system can change the last floating-point digit and therefore the CSV checksum. Feature values, file checksums, source cohort size, training cutoff, and model provenance are checked before accepting runtime data. Changed inputs fail initialization without overwriting an existing valid runtime dataset.
 
-The portable export transfers the **existing champion only**, rather than the entire host experiment history. Initialization reloads that fitted pipeline and records a restoration run in the separate container registry, preserving the original promotion policy and source version/run IDs. It does not retrain or award a new policy approval. The current forest therefore remains `legacy-v1`; subsequent `/train` jobs must pass `calendar-reference-v2` to replace it. Runtime registry version numbers belong to the new store and may differ from host version numbers.
+The portable export transfers the **existing champion only**, rather than the entire host experiment history. Initialization reloads that fitted pipeline and records a restoration run in the separate container registry, preserving the original promotion policy and source version/run IDs. It does not retrain or award a new policy approval. A legacy export retains `legacy-v1`; `/train` jobs must pass `calendar-reference-v2` to replace it. The MAE-aligned forest has passed that gate through normal training. Runtime registry version numbers belong to the new store and may differ from host version numbers. A separate portable export of host version 7 is available locally at `artifacts/deployment-v7/champion`; choose `STEEL_ENERGY_MODEL_SEEDS=./artifacts/deployment-v7` when initializing a fresh volume from it. An existing volume retains its own champion.
 
 The named volume `steel-energy-mlops_runtime` holds prepared training data, the SQLite database, models, prediction artifacts, HTTP audit records, and training-job results. API and UI use the same `/runtime` path so stored artifact locations remain valid in both containers. Restart initialization validates the data against the existing champion and retains that champion without importing another model version. Host artifacts and the host SQLite store are separate.
 

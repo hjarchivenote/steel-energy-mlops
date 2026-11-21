@@ -95,7 +95,8 @@ def fit_candidates(
         ),
         "random_forest": (
             Pipeline([("model", RandomForestRegressor(n_estimators=forest_trees, random_state=seed, n_jobs=1))]),
-            {"model__max_depth": [6, None], "model__min_samples_leaf": [2, 8]},
+            {"model__criterion": ["squared_error", "absolute_error"],
+             "model__max_depth": [6, None], "model__min_samples_leaf": [2, 8]},
         ),
         "hist_gradient_boosting": (
             Pipeline([("model", HistGradientBoostingRegressor(

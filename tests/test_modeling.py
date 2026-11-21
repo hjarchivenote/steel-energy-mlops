@@ -63,6 +63,11 @@ def test_models_are_selected_without_validation_or_test_observations(prepared_tr
         assert candidate.cv_mae >= 0 and candidate.trials
     ridge = next(candidate for candidate in candidates if candidate.name == "ridge")
     assert ridge.model.named_steps["scale"].n_samples_seen_ == len(data.train.target)
+    forest = next(candidate for candidate in candidates if candidate.name == "random_forest")
+    assert {trial["parameters"]["model__criterion"] for trial in forest.trials} == {
+        "squared_error", "absolute_error",
+    }
+    assert forest.cv_mae == min(trial["cv_mae"] for trial in forest.trials)
 
 
 @pytest.mark.parametrize("families", [(), ("unknown",), ("ridge", "ridge")])
