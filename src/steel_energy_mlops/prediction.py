@@ -14,6 +14,7 @@ from sklearn.pipeline import Pipeline
 from threadpoolctl import threadpool_limits
 
 from steel_energy_mlops.data import DataValidationError
+from steel_energy_mlops.model_io import load_checked_model
 from steel_energy_mlops.features import FEATURE_NAMES, calendar_features
 from steel_energy_mlops.tracking import DEFAULT_MODEL, DEFAULT_WORKSPACE, champion_version, open_store
 from steel_energy_mlops.tracking import require_compatible_version, store_client, validate_model_name
@@ -24,7 +25,7 @@ def _load_champion(client: MlflowClient, model_name: str) -> tuple[ModelVersion,
     if version is None:
         raise DataValidationError("No validated champion model is available; train an eligible model first.")
     require_compatible_version(version)
-    model = load_model(f"models:/{model_name}/{version.version}")
+    model = load_checked_model(load_model, f"models:/{model_name}/{version.version}")
     if not isinstance(model, Pipeline):
         raise DataValidationError("Registered champion must contain a fitted sklearn Pipeline.")
     return version, model

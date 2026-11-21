@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 from types import SimpleNamespace
 from urllib.parse import unquote, urlparse
+from zipfile import BadZipFile
 
 from fastapi.testclient import TestClient
 from filelock import FileLock
@@ -222,7 +223,8 @@ def test_failed_saved_model_round_trip_never_sets_an_alias(pair, tmp_path, monke
     assert champion_version(store_client(tmp_path), models.DEFAULT_FORECAST_MODEL) is None
 
 
-@pytest.mark.parametrize("failure", ["checksum", "format", "evidence", "uri", "mixed-role", "unfinished", "cutoff"])
+@pytest.mark.parametrize("failure", ["checksum", "format", "evidence", "uri", "mixed-role", "unfinished", "cutoff",
+                                     "history-reference", "evidence-run", "train-hash", "validation-hash"])
 def test_corrupted_pair_fails_before_serving(pair, failure):
     client = store_client(pair["workspace"])
     version = champion_version(client, models.DEFAULT_FORECAST_MODEL)
@@ -239,6 +241,14 @@ def test_corrupted_pair_fails_before_serving(pair, failure):
         manifest["models"]["calendar"] = "models:/some-mutable-alias"
     elif failure == "mixed-role":
         manifest["models"]["calendar"] = manifest["models"]["history"]
+    elif failure == "history-reference":
+        manifest["models"]["history"] = manifest["models"]["calendar"]
+    elif failure == "evidence-run":
+        manifest["evidence_run_id"] = "b" * 32
+    elif failure == "train-hash":
+        manifest["train_sha256"] = "b" * 64
+    elif failure == "validation-hash":
+        manifest["validation_sha256"] = "b" * 64
     elif failure == "unfinished":
         client.set_terminated(version.run_id, status="FAILED")
     elif failure == "cutoff":
@@ -275,3 +285,60 @@ def test_forecasts_cannot_predate_training_label_availability(pair):
         response = client.post("/forecast", json={"timestamps": [pair["cutoff"]]})
     assert response.status_code == 422
     assert "training-label availability" in response.json()["error"]["message"]
+
+
+@pytest.mark.parametrize("tag", ["evidence_run_id", "routing_policy", "publication_policy"])
+def test_forecast_registry_tags_must_agree_with_publication(pair, tag):
+    client = store_client(pair["workspace"])
+    version = champion_version(client, models.DEFAULT_FORECAST_MODEL)
+    original = version.tags[tag]
+    client.set_model_version_tag(version.name, version.version, tag, "different")
+    try:
+        with pytest.raises(DataValidationError, match="provenance"):
+            models.load_forecast_pair(pair["workspace"])
+    finally:
+        client.set_model_version_tag(version.name, version.version, tag, original)
+
+
+@pytest.mark.parametrize("metric", ["mae", "rmse", "p95_absolute_error", "high_usage_mae", "high_usage_bias"])
+@pytest.mark.parametrize("control", ["calendar", "persistence"])
+def test_numeric_scores_must_pass_even_when_saved_flags_claim_success(pair, metric, control):
+    evidence = deepcopy(pair["evidence"])
+    evidence["scores"][control][metric] = 0.
+    with pytest.raises(DataValidationError, match="pass flags"):
+        models._require_evidence(evidence)
+
+
+@pytest.mark.parametrize("failure", ["missing-scores", "score-shape", "rows", "empty-high", "different-high",
+                                     "nan", "string", "negative", "boolean", "integer-flag", "missing-flag"])
+def test_invalid_frozen_score_evidence_is_rejected(pair, failure):
+    evidence = deepcopy(pair["evidence"])
+    if failure == "missing-scores":
+        del evidence["scores"]
+    elif failure == "score-shape":
+        evidence["scores"]["candidate"] = []
+    elif failure == "integer-flag":
+        evidence["checks"]["calendar_mae"] = 1
+    elif failure == "missing-flag":
+        del evidence["checks"]["calendar_mae"]
+    else:
+        key, value = {"rows": ("rows", 749), "empty-high": ("high_usage_rows", 0),
+                      "different-high": ("high_usage_rows", 139), "nan": ("mae", float("nan")),
+                      "string": ("mae", "1"), "negative": ("mae", -1), "boolean": ("mae", True)}[failure]
+        evidence["scores"]["candidate"][key] = value
+    with pytest.raises(DataValidationError):
+        models._require_evidence(evidence)
+
+
+def test_corrupt_forecast_archive_is_unavailable_and_logs_no_prediction(pair, monkeypatch):
+    def broken_archive(uri):
+        raise BadZipFile("private path and archive details")
+    tracker = store_client(pair["workspace"])
+    experiments = [item.experiment_id for item in tracker.search_experiments()]
+    before = len(tracker.search_runs(experiments))
+    monkeypatch.setattr(models, "load_model", broken_archive)
+    with TestClient(create_app(pair["workspace"])) as client:
+        for response in (client.get("/forecast/ready"), client.post("/forecast", json=request_body())):
+            assert response.status_code == 503
+            assert "private path" not in response.text
+    assert len(tracker.search_runs(experiments)) == before

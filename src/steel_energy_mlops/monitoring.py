@@ -20,6 +20,7 @@ from sklearn.pipeline import Pipeline
 from threadpoolctl import threadpool_limits
 
 from steel_energy_mlops.data import DataValidationError
+from steel_energy_mlops.model_io import load_checked_model
 from steel_energy_mlops.features import FEATURE_NAMES, calendar_features
 from steel_energy_mlops.tracking import DEFAULT_MODEL, DEFAULT_WORKSPACE, champion_version, open_store
 from steel_energy_mlops.tracking import require_compatible_version, validate_model_name
@@ -213,7 +214,7 @@ def _monitor_locked(
             "interpretation": INTERPRETATION,
         }
         if len(current) >= MINIMUM_ROWS and len(train.target) >= MINIMUM_ROWS:
-            model = load_model(f"models:/{model_name}/{version.version}")
+            model = load_checked_model(load_model, f"models:/{model_name}/{version.version}")
             if not isinstance(model, Pipeline):
                 raise DataValidationError("Monitoring reference model must contain a fitted sklearn Pipeline.")
             with threadpool_limits(limits=1):

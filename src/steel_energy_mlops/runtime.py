@@ -19,6 +19,7 @@ import skops.io
 from sklearn.pipeline import Pipeline
 
 from steel_energy_mlops.data import DataValidationError
+from steel_energy_mlops.model_io import load_checked_model
 from steel_energy_mlops.features import FEATURE_NAMES, calendar_features
 from steel_energy_mlops.tracking import DEFAULT_MODEL, champion_version, open_store, require_compatible_version
 from steel_energy_mlops.tracking import store_client, validate_model_name
@@ -127,7 +128,7 @@ def initialize_runtime(
                 return {"model_name": model_name, "model_version": str(existing.version), "restored": False}
             manifest = _seed_manifest(seed, model_name)
             _copy_runtime_data(source, directory, manifest["tags"], expected_rows)
-            model = load_model(str(seed / "model"))
+            model = load_checked_model(load_model, str(seed / "model"))
             if not isinstance(model, Pipeline):
                 raise DataValidationError("Runtime champion must contain a fitted sklearn Pipeline.")
             example = np.asarray([calendar_features(datetime(2018, 1, 1))])

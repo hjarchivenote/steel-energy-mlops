@@ -121,6 +121,8 @@ The check verifies source/partition hashes and writes a machine-readable compati
 
 The history estimator and its matched calendar fallback are saved together in one MLflow publication run. The registered model `steel-energy-history-15min` has its own serving alias, separate from `steel-energy-calendar`. Publication checks the frozen configuration and validation evidence, round-trips both pipelines through skops serialization, and finishes all artifact writes before exposing the alias. Its `history-frozen-validation-v1` publication policy records prior offline evidence; it is separate from the calendar promotion policy. Replacing an existing history champion requires a new validation decision.
 
+Loading verifies that the history reference is the registered estimator, both estimators belong to the publication, and the evidence identifiers and data hashes agree. The saved scores must independently satisfy the frozen criteria even when their stored pass flags are true. Damaged or incompatible model archives return an unavailable-model error; failed loads never create a successful prediction record.
+
 With the original source and prepared sample restored, publish the fixed pair **once**, then start the local service:
 
 ```bash

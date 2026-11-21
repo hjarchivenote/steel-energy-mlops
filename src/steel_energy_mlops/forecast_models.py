@@ -22,6 +22,7 @@ from steel_energy_mlops.data import DataValidationError
 from steel_energy_mlops.features import FEATURE_NAMES
 from steel_energy_mlops.forecast_inputs import FORECAST_FEATURE_CONTRACT, FORECAST_FEATURE_NAMES
 from steel_energy_mlops.forecast_routing import FORECAST_ROUTING_POLICY
+from steel_energy_mlops.model_io import load_checked_model
 from steel_energy_mlops.tracking import DEFAULT_MODEL, DEFAULT_WORKSPACE, champion_version, open_store
 from steel_energy_mlops.tracking import store_client, validate_model_name
 
@@ -44,7 +45,8 @@ def _require_evidence(evidence: dict[str, Any]) -> None:
     names = {f"{control}_{metric}" for control in ("calendar", "persistence")
              for metric in ("mae", "rmse", "p95", "high_mae", "high_bias")}
     if (evidence.get("eligible_for_further_development") is not True
-            or evidence.get("checks") != dict.fromkeys(names, True)
+            or not isinstance(evidence.get("checks"), dict) or set(evidence["checks"]) != names
+            or any(value is not True for value in evidence["checks"].values())
             or evidence.get("final_test_evaluated") is not False
             or not isinstance(plan, dict) or plan.get("candidate") != FROZEN_HISTORY_PARAMETERS
             or plan.get("reporting_delay_minutes") != 15 or plan.get("forecast_horizon_minutes") != 15
@@ -54,6 +56,31 @@ def _require_evidence(evidence: dict[str, Any]) -> None:
     if (any(re.fullmatch(r"[0-9a-f]{64}", str(value)) is None for value in hashes)
             or re.fullmatch(r"[0-9a-f]{32}", str(evidence.get("run_id"))) is None):
         raise DataValidationError("Frozen evidence must identify its data and validation run.")
+    _require_scores(evidence)
+
+
+def _require_scores(evidence: dict[str, Any]) -> None:
+    """Recompute the frozen criteria instead of trusting saved pass flags."""
+    scores = evidence.get("scores")
+    metrics = ("mae", "rmse", "p95_absolute_error", "high_usage_mae", "high_usage_bias")
+    if not isinstance(scores, dict) or set(scores) != {"candidate", "calendar", "persistence"}:
+        raise DataValidationError("Frozen evidence must contain all three validation scores.")
+    for row in scores.values():
+        if (not isinstance(row, dict) or type(row.get("rows")) is not int or row["rows"] != 750
+                or type(row.get("high_usage_rows")) is not int or not 1 <= row["high_usage_rows"] <= 750
+                or any(type(row.get(key)) not in (int, float) or not np.isfinite(row[key])
+                       or (key != "high_usage_bias" and row[key] < 0) for key in metrics)):
+            raise DataValidationError("Frozen validation scores require finite metrics for the fixed 750 targets.")
+    candidate = scores["candidate"]
+    for name in ("calendar", "persistence"):
+        control = scores[name]
+        if (candidate["high_usage_rows"] != control["high_usage_rows"]
+                or candidate["mae"] > control["mae"] * 0.99
+                or candidate["rmse"] > control["rmse"]
+                or candidate["p95_absolute_error"] > control["p95_absolute_error"]
+                or candidate["high_usage_mae"] > control["high_usage_mae"]
+                or abs(candidate["high_usage_bias"]) > abs(control["high_usage_bias"]) * 0.9):
+            raise DataValidationError("Saved pass flags disagree with the frozen validation criteria.")
 
 
 def _require_model(model: Any, width: int) -> Pipeline:
@@ -118,7 +145,7 @@ def _publish_pair(history, calendar, example, evidence, workspace, model_name, t
             info = log_model(model, name=role, input_example=sample, serialization_format="skops",
                              skops_trusted_types=trusted, pip_requirements=requirements,
                              metadata={"role": role, "feature_names": list(names)})
-            restored = _require_model(load_model(info.model_uri), len(names))
+            restored = _require_model(load_checked_model(load_model, info.model_uri), len(names))
             if not np.allclose(model.predict(sample), restored.predict(sample), rtol=0, atol=1e-12):
                 raise DataValidationError("Saved forecast model predictions differ from their training instance.")
             uris[role] = info.model_uri
@@ -163,6 +190,13 @@ def load_forecast_pair(workspace: Path, model_name: str = DEFAULT_FORECAST_MODEL
     if _digest(evidence) != manifest.get("evidence_sha256"):
         raise DataValidationError("Forecast validation evidence differs from its publication.")
     _require_evidence(evidence)
+    if (manifest.get("evidence_run_id") != evidence["run_id"]
+            or manifest.get("train_sha256") != evidence["plan"]["train_sha256"]
+            or manifest.get("validation_sha256") != evidence["validation_sha256"]
+            or version.tags.get("evidence_run_id") != evidence["run_id"]
+            or version.tags.get("routing_policy") != FORECAST_ROUTING_POLICY
+            or version.tags.get("publication_policy") != FORECAST_PUBLICATION_POLICY):
+        raise DataValidationError("Forecast bundle provenance differs from its validation or registry tags.")
     _cutoff(manifest.get("train_last_timestamp"))
     models = manifest.get("models", {})
     if (not isinstance(models, dict) or set(models) != {"history", "calendar"}
@@ -171,8 +205,10 @@ def load_forecast_pair(workspace: Path, model_name: str = DEFAULT_FORECAST_MODEL
     # Both logged models must belong to the same publication; a mutable alias cannot supply the fallback.
     if any(client.get_logged_model(uri.split("/")[-1]).source_run_id != version.run_id for uri in models.values()):
         raise DataValidationError("Forecast estimators must belong to the same publication run.")
-    history = _require_model(load_model(f"models:/{model_name}/{version.version}"), len(FORECAST_FEATURE_NAMES))
-    calendar = _require_model(load_model(models["calendar"]), len(FEATURE_NAMES))
+    if models["history"] != version.source or models["history"] == models["calendar"]:
+        raise DataValidationError("Forecast history reference must match the registry and use a distinct fallback.")
+    history = _require_model(load_checked_model(load_model, models["history"]), len(FORECAST_FEATURE_NAMES))
+    calendar = _require_model(load_checked_model(load_model, models["calendar"]), len(FEATURE_NAMES))
     metadata = {"model_name": model_name, "model_version": str(version.version),
                 "feature_contract": FORECAST_FEATURE_CONTRACT, "routing_policy": FORECAST_ROUTING_POLICY,
                 "publication_policy": FORECAST_PUBLICATION_POLICY, "evidence_run_id": manifest["evidence_run_id"],

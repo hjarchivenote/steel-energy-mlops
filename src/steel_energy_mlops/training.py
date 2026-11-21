@@ -18,6 +18,7 @@ from sklearn.pipeline import Pipeline
 from threadpoolctl import threadpool_limits
 
 from steel_energy_mlops.data import DataValidationError
+from steel_energy_mlops.model_io import load_checked_model
 from steel_energy_mlops.features import FEATURE_NAMES
 from steel_energy_mlops.modeling import BASELINES, LEARNED_FAMILIES, ErrorMetrics, error_metrics, fit_candidates
 from steel_energy_mlops.promotion import MINIMUM_IMPROVEMENT, PROMOTION_POLICY, REQUIRED_REFERENCES
@@ -74,7 +75,7 @@ def _train_locked(
         training_cutoff = incumbent_version.tags.get("train_last_timestamp")
         if not training_cutoff or datetime.fromisoformat(training_cutoff) >= data.validation.timestamps[0]:
             raise DataValidationError("Incumbent training data overlaps this validation window or lacks provenance.")
-        incumbent_model = load_model(f"models:/{model_name}/{incumbent_version.version}")
+        incumbent_model = load_checked_model(load_model, f"models:/{model_name}/{incumbent_version.version}")
         if not isinstance(incumbent_model, Pipeline):
             raise DataValidationError("Registered champion must contain a fitted sklearn Pipeline.")
         incumbent_predictions = np.asarray(incumbent_model.predict(data.validation.features), dtype=np.float64)

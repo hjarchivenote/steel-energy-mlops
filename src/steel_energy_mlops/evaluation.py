@@ -13,6 +13,7 @@ from sklearn.pipeline import Pipeline
 from threadpoolctl import threadpool_limits
 
 from steel_energy_mlops.data import DataValidationError, WEEKDAYS
+from steel_energy_mlops.model_io import load_checked_model
 from steel_energy_mlops.modeling import calendar_folds, error_metrics
 from steel_energy_mlops.seasonal import PROFILE_STATISTICS, fit_schedule_profile
 from steel_energy_mlops.tracking import DEFAULT_MODEL, DEFAULT_WORKSPACE, champion_version, open_store
@@ -91,7 +92,7 @@ def evaluate_champion(
         if version.tags.get(key) != expected:
             raise DataValidationError("Champion provenance must match these fixed training and validation partitions.")
     model_uri = f"models:/{model_name}/{version.version}"
-    model = load_model(model_uri)
+    model = load_checked_model(load_model, model_uri)
     if not isinstance(model, Pipeline):
         raise DataValidationError("Registered champion must contain a fitted sklearn Pipeline.")
     with threadpool_limits(limits=1):

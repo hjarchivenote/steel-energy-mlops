@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
 from uuid import UUID
+from zipfile import BadZipFile
 
 from fastapi.testclient import TestClient
 from filelock import Timeout
@@ -310,3 +311,14 @@ def test_serve_cli_rejects_invalid_ports(port) -> None:
 def test_serve_cli_reports_invalid_configuration(capsys) -> None:
     assert main(["serve", "--model-name", "../bad"]) == 2
     assert "API startup failed:" in capsys.readouterr().err
+
+
+def test_corrupt_calendar_archive_is_reported_as_unavailable(api_sessions, monkeypatch):
+    def broken_archive(uri):
+        raise BadZipFile("private path and archive details")
+    monkeypatch.setattr(prediction, "load_model", broken_archive)
+    session = api_sessions[0]
+    with TestClient(create_app(session["workspace"], session["name"])) as client:
+        for response in (client.get("/ready"), client.post("/predict", json={"timestamps": STAMPS})):
+            assert response.status_code == 503
+            assert "private path" not in response.text
