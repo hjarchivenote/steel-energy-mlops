@@ -38,7 +38,8 @@ def test_compose_build_restore_predict_and_train(tmp_path, pytestconfig, monkeyp
     environment = {key: value for key, value in os.environ.items()
                    if key not in ("COMPOSE_FILE", "COMPOSE_PROJECT_NAME", "COMPOSE_PROFILES")}
     environment.update(STEEL_ENERGY_PREPARED_DATA=str(directory), STEEL_ENERGY_MODEL_SEEDS=str(seeds),
-                       STEEL_ENERGY_API_PORT="0", STEEL_ENERGY_MLFLOW_PORT="0", STEEL_ENERGY_DASHBOARD_PORT="0")
+                       STEEL_ENERGY_API_PORT="0", STEEL_ENERGY_MLFLOW_PORT="0", STEEL_ENERGY_DASHBOARD_PORT="0",
+                       STEEL_ENERGY_MONITOR_INTERVAL_SECONDS="2")
 
     def compose(*arguments, check=True):
         completed = subprocess.run(["docker", "compose", "-p", project, *arguments],
@@ -80,8 +81,16 @@ def test_compose_build_restore_predict_and_train(tmp_path, pytestconfig, monkeyp
                                    rtol=0, atol=1e-8)
         artifact = ui + "/get-artifact?" + urlencode({"run_id": prediction["run_id"], "path": "response.json"})
         assert request(artifact)[1] == prediction
-        monitored = json.loads(compose("exec", "-T", "api", "steel-energy", "monitor", "--workspace",
-                                       "/runtime/mlflow", "--data", "/runtime/data/processed").stdout)
+        read_snapshot = (
+            "import json; from pathlib import Path; from steel_energy_mlops.dashboard import load_dashboard; "
+            "v=load_dashboard(Path('/runtime/mlflow'),'steel-energy-calendar'); print(json.dumps(v.summary))"
+        )
+        deadline = time.monotonic() + 90
+        monitored = json.loads(compose("exec", "-T", "api", "python", "-c", read_snapshot).stdout)
+        while (monitored is None or monitored["unique_rows"] != 100) and time.monotonic() < deadline:
+            time.sleep(2)
+            monitored = json.loads(compose("exec", "-T", "api", "python", "-c", read_snapshot).stdout)
+        assert monitored is not None, "Automatic monitoring did not publish a completed snapshot."
         assert monitored["unique_rows"] == 100 and monitored["html_artifact"]
         assert monitored["status"] in ("distribution_changed", "no_drift_detected")
         report_url = ui + "/get-artifact?" + urlencode({"run_id": monitored["run_id"], "path": "drift_report.html"})
@@ -122,11 +131,14 @@ else:
             "(d/'result.json').write_bytes((p.parent/'result.json').read_bytes())"
         )
         compose("exec", "-T", "api", "python", "-c", seed_orphan)
-        compose("restart", "api")
+        compose("restart", "api", "monitor")
         compose("up", "-d", "--wait", "--wait-timeout", "180")
         api = "http://" + compose("port", "api", "8000").stdout.strip()
         recovered = request(api + f"/train/{orphan_id}")[1]
         assert recovered["status"] == "succeeded" and recovered["result"] == job["result"]
+        worker_state = json.loads(compose("exec", "-T", "monitor", "cat",
+                                          "/runtime/mlflow/monitoring_service.json").stdout)
+        assert worker_state["status"] == "skipped_unchanged" and worker_state["monitor_run_id"] == monitored["run_id"]
         status, retry = request(api + "/train", {"families": ["ridge"]})
         assert status == 202 and retry["job_id"] != job["job_id"]
         assert wait_for_job(retry)["result"]["promoted"] is False

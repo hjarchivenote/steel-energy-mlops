@@ -17,6 +17,7 @@ from steel_energy_mlops.evaluation import evaluate_champion
 from steel_energy_mlops.input_audit import audit_inputs
 from steel_energy_mlops.modeling import LEARNED_FAMILIES
 from steel_energy_mlops.monitoring import monitor_predictions
+from steel_energy_mlops.monitoring_worker import watch_monitoring
 from steel_energy_mlops.prediction import predict_consumption
 from steel_energy_mlops.preparation import prepare_dataset
 from steel_energy_mlops.promotion import MINIMUM_IMPROVEMENT
@@ -60,6 +61,14 @@ def main(arguments: Sequence[str] | None = None) -> int:
     monitor.add_argument("--model-name", default=DEFAULT_MODEL)
     monitor.add_argument("--lookback-hours", type=int, default=168)
     monitor.add_argument("--max-runs", type=int, default=100)
+    monitor.add_argument("--if-changed", action="store_true")
+    watch = commands.add_parser("watch-monitoring", help="Refresh monitoring snapshots when inputs change")
+    watch.add_argument("--data", type=Path, default=Path("data/processed"))
+    watch.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
+    watch.add_argument("--model-name", default=DEFAULT_MODEL)
+    watch.add_argument("--lookback-hours", type=int, default=168)
+    watch.add_argument("--max-runs", type=int, default=100)
+    watch.add_argument("--interval-seconds", type=int, default=60)
     evaluate = commands.add_parser("evaluate", help="Compare the pinned champion with schedule references")
     evaluate.add_argument("--data", type=Path, default=Path("data/processed"))
     evaluate.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
@@ -99,7 +108,11 @@ def main(arguments: Sequence[str] | None = None) -> int:
         elif args.command == "evaluate":
             result = evaluate_champion(args.data, args.workspace, args.model_name)
         elif args.command == "monitor":
-            result = monitor_predictions(args.data, args.workspace, args.model_name, args.lookback_hours, args.max_runs)
+            result = monitor_predictions(args.data, args.workspace, args.model_name, args.lookback_hours, args.max_runs,
+                                         args.if_changed)
+        elif args.command == "watch-monitoring":
+            result = watch_monitoring(args.data, args.workspace, args.model_name, args.lookback_hours, args.max_runs,
+                                      args.interval_seconds)
         elif args.command == "audit-inputs":
             result = audit_inputs(args.input, args.data, args.reporting_delay_minutes, args.workspace)
         elif args.command == "serve":
@@ -118,6 +131,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
                       "evaluate": "Validation diagnostics", "serve": "API startup",
                       "export-model": "Model export", "init-runtime": "Runtime initialization",
                       "monitor": "Prediction monitoring",
+                      "watch-monitoring": "Automatic monitoring",
                       "audit-inputs": "Input audit"}
         operation = operations[args.command]
         print(f"{operation} failed: {exc}", file=sys.stderr)

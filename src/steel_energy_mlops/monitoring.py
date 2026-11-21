@@ -1,6 +1,9 @@
 """Version-scoped request distribution monitoring, without target-error or retraining claims."""
 
 from datetime import datetime, timedelta, timezone
+import hashlib
+from importlib.metadata import version as package_version
+import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -8,7 +11,9 @@ from typing import Any
 
 import mlflow
 from mlflow import MlflowClient
+from mlflow.entities import Run
 from mlflow.sklearn import load_model
+from filelock import FileLock, Timeout
 import numpy as np
 import pandas as pd
 from sklearn.pipeline import Pipeline
@@ -52,21 +57,25 @@ def _logged_frame(path: Path, records: str) -> pd.DataFrame:
     return frame
 
 
-def _current(
+def _prediction_runs(
     client: MlflowClient, model_name: str, version: str, since: datetime, as_of: datetime, max_runs: int,
-) -> tuple[pd.DataFrame, list[str], int]:
+) -> list[Run]:
     experiment = client.get_experiment_by_name("steel-energy-prediction")
+    if experiment is None:
+        return []
+    filters = (f"params.model_name = '{model_name}' AND params.model_version = '{version}' "
+               f"AND attributes.status = 'FINISHED' AND attributes.start_time >= {int(since.timestamp() * 1000)} "
+               f"AND attributes.start_time <= {int(as_of.timestamp() * 1000)}")
+    return list(client.search_runs([experiment.experiment_id], filter_string=filters, max_results=max_runs,
+                                   order_by=["attributes.start_time DESC", "attributes.run_id ASC"]))
+
+
+def _current(client: MlflowClient, runs: list[Run]) -> tuple[pd.DataFrame, list[str], int]:
     frames, run_ids = [], []
-    if experiment is not None:
-        filters = (f"params.model_name = '{model_name}' AND params.model_version = '{version}' "
-                   f"AND attributes.status = 'FINISHED' AND attributes.start_time >= {int(since.timestamp() * 1000)} "
-                   f"AND attributes.start_time <= {int(as_of.timestamp() * 1000)}")
-        runs = client.search_runs([experiment.experiment_id], filter_string=filters, max_results=max_runs,
-                                  order_by=["attributes.start_time DESC", "attributes.run_id ASC"])
-        for run in runs:
-            path = Path(client.download_artifacts(run.info.run_id, "predictions.csv"))
-            frames.append(_logged_frame(path, run.data.params.get("records", "0")))
-            run_ids.append(run.info.run_id)
+    for run in runs:
+        path = Path(client.download_artifacts(run.info.run_id, "predictions.csv"))
+        frames.append(_logged_frame(path, run.data.params.get("records", "0")))
+        run_ids.append(run.info.run_id)
     frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(
         {name: [] for name in ("timestamp", *MONITORED_COLUMNS)}
     )
@@ -100,15 +109,48 @@ def _drift_report(current: pd.DataFrame, reference: pd.DataFrame, output: Path) 
     return snapshot.dict()
 
 
-def monitor_predictions(
-    directory: Path = Path("data/processed"), workspace: Path = DEFAULT_WORKSPACE, model_name: str = DEFAULT_MODEL,
-    lookback_hours: int = 168, max_runs: int = 100,
-) -> dict[str, Any]:
+def validate_monitor_options(model_name: str, lookback_hours: int, max_runs: int) -> None:
     validate_model_name(model_name)
     if type(lookback_hours) is not int or not 1 <= lookback_hours <= 720:
         raise DataValidationError("Monitoring lookback must be between 1 and 720 hours.")
     if type(max_runs) is not int or not 1 <= max_runs <= 1000:
         raise DataValidationError("Monitoring run limit must be between 1 and 1000.")
+
+
+def monitor_predictions(
+    directory: Path = Path("data/processed"), workspace: Path = DEFAULT_WORKSPACE, model_name: str = DEFAULT_MODEL,
+    lookback_hours: int = 168, max_runs: int = 100, only_if_changed: bool = False,
+) -> dict[str, Any]:
+    validate_monitor_options(model_name, lookback_hours, max_runs)
+    if type(only_if_changed) is not bool:
+        raise DataValidationError("Monitoring change detection must be a boolean.")
+    workspace = workspace.resolve()
+    workspace.mkdir(parents=True, exist_ok=True)
+    lease = FileLock(workspace / "monitoring.lock", timeout=0)
+    try:
+        lease.acquire()
+    except Timeout:
+        return {"status": "skipped_busy", "model_name": model_name}
+    try:
+        return _monitor_locked(directory, workspace, model_name, lookback_hours, max_runs, only_if_changed)
+    finally:
+        lease.release()
+
+
+def _refresh_decision(previous: Run | None, fingerprint: str, now: datetime) -> str | None:
+    if previous is None or previous.data.params.get("monitor_fingerprint") != fingerprint:
+        return None
+    age = now.timestamp() - (previous.info.end_time or previous.info.start_time or 0) / 1000
+    if previous.info.status == "FINISHED" and 0 <= age < 86400:
+        return "skipped_unchanged"
+    if previous.info.status in ("FAILED", "KILLED") and 0 <= age < 300:
+        return "retry_wait"
+    return None
+
+
+def _monitor_locked(
+    directory: Path, workspace: Path, model_name: str, lookback_hours: int, max_runs: int, only_if_changed: bool,
+) -> dict[str, Any]:
     client, experiment_id = open_store(workspace, "steel-energy-monitoring")
     version = champion_version(client, model_name)
     if version is None:
@@ -116,16 +158,45 @@ def monitor_predictions(
     require_compatible_version(version)
     as_of = datetime.now(timezone.utc)
     since = as_of - timedelta(hours=lookback_hours)
+    runs = _prediction_runs(client, model_name, str(version.version), since, as_of, max_runs)
+    reference_hashes = {}
+    for name in ("train.csv", "manifest.json"):
+        try:
+            reference_hashes[name] = hashlib.sha256((directory / name).read_bytes()).hexdigest()
+        except OSError:
+            # Start a failed run below rather than hiding an unreadable reference behind an old snapshot.
+            reference_hashes[name] = None
+    fingerprint = hashlib.sha256(json.dumps({
+        "model_name": model_name, "model_version": str(version.version),
+        "train_sha256": version.tags.get("train_sha256", ""), "lookback_hours": lookback_hours, "max_runs": max_runs,
+        "source_run_ids": sorted(run.info.run_id for run in runs),
+        "reference_files": reference_hashes,
+        "report_policy": [MINIMUM_ROWS, DRIFT_THRESHOLD, REPORT_DECIMAL_PLACES, package_version("evidently")],
+    }, sort_keys=True).encode()).hexdigest()
+    previous = client.search_runs([experiment_id], max_results=1,
+                                  filter_string=f"params.model_name = '{model_name}' "
+                                                f"AND params.model_version = '{version.version}' "
+                                                f"AND params.train_sha256 = '{version.tags.get('train_sha256', '')}' "
+                                                "AND tags.operation = 'request_distribution_monitoring'",
+                                  order_by=["attributes.start_time DESC", "attributes.run_id ASC"])
+    latest = previous[0] if previous else None
+    # Owning the shared lock proves any older RUNNING attempt has lost its monitor process.
+    if latest is not None and latest.info.status == "RUNNING":
+        client.set_terminated(latest.info.run_id, status="KILLED")
+        latest = None
+    decision = _refresh_decision(latest, fingerprint, as_of) if only_if_changed else None
+    if decision is not None and latest is not None:
+        return {"status": decision, "model_name": model_name, "run_id": latest.info.run_id}
     with mlflow.start_run(experiment_id=experiment_id, run_name="request-distribution-monitoring") as run:
         mlflow.set_tag("operation", "request_distribution_monitoring")
         mlflow.log_params({"model_name": model_name, "model_version": str(version.version),
                            "train_sha256": version.tags.get("train_sha256", ""),
-                           "lookback_hours": lookback_hours, "max_runs": max_runs})
+                           "lookback_hours": lookback_hours, "max_runs": max_runs, "monitor_fingerprint": fingerprint})
         # Record the attempt before reading inputs so failures cannot leave an older verdict looking current.
         train = load_training_partition(directory)
         if version.tags.get("train_sha256") != train.sha256:
             raise DataValidationError("Monitoring reference must match the pinned champion's training checksum.")
-        current, run_ids, raw_rows = _current(client, model_name, str(version.version), since, as_of, max_runs)
+        current, run_ids, raw_rows = _current(client, runs)
         summary: dict[str, Any] = {
             "run_id": run.info.run_id, "model_name": model_name, "model_version": str(version.version),
             "feature_contract": version.tags["feature_contract"],

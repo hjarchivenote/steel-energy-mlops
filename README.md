@@ -260,13 +260,35 @@ Both datasets need at least 100 rows after deduplicating current timestamps. Oth
 
 The `steel-energy-monitoring` experiment stores `monitoring_summary.json` and the deduplicated `current_predictions.csv`. Evaluated snapshots also contain `evidently.json` and a standalone `drift_report.html`. A detected change yields `distribution_changed`; otherwise the result is `no_drift_detected`. These refer to request schedules and prediction distributions. Calendar seasonality or deliberately selected queries can cause a signal. Without observed consumption, this operation cannot assess actual prediction error or factory-load changes. It does not retrain, promote a model, or open the validation or final test CSV. Attempts for a compatible champion are recorded before reading input data, so failures while loading prediction artifacts are visible as failed monitoring runs.
 
+### Automatic report refresh
+
+The Compose stack starts a dedicated `monitor` service alongside the API, MLflow, and dashboard. It checks every 60 seconds by default and creates a new snapshot when eligible prediction run IDs, the deployed model, reference-file hashes, or monitoring settings change. Unchanged successful snapshots are reused for up to 24 hours. Expired requests falling outside the rolling window also change the input set. Change checks inspect run metadata and hash the local training CSV and manifest; they do not reload every prediction artifact when the inputs are unchanged.
+
+A workspace-wide `monitoring.lock` serializes manual and automatic reports. Busy calls skip without queuing. A restarted worker closes an abandoned `RUNNING` monitoring attempt as `KILLED` before recovering under that lock. Failed attempts with unchanged inputs wait five minutes before retrying; changed inputs can retry immediately. These decisions use persisted MLflow metadata and survive a worker restart. The service never trains a model or changes the champion alias.
+
+`STEEL_ENERGY_MONITOR_INTERVAL_SECONDS` sets the Compose polling interval, from 1 to 3,600 seconds. The worker handles shutdown signals, records an atomic heartbeat in `monitoring_service.json`, and becomes unhealthy when its last check failed, is waiting to retry a failure, or its heartbeat is stale. The dashboard keeps its read-only mount.
+
+For a one-off change-aware refresh in the activated local environment:
+
+```bash
+steel-energy monitor --if-changed --data data/processed --workspace artifacts/mlflow
+```
+
+Without `--if-changed`, the existing `monitor` command forces a fresh report after acquiring the same lock. This can be used after repairing an artifact. To run the local worker outside Compose:
+
+```bash
+steel-energy watch-monitoring --data data/processed --workspace artifacts/mlflow --interval-seconds 60
+```
+
+This is a single-host polling service using the shared workspace, not a distributed scheduler. Saved prediction artifacts are treated as immutable inputs identified by their run IDs. There is no automatic retraining based on a drift signal.
+
 ### Monitoring dashboard
 
 The Compose stack includes a Streamlit dashboard at [http://127.0.0.1:18501](http://127.0.0.1:18501). It reads the latest monitoring attempt for the deployed model version and training checksum. The runtime volume is mounted read-only in this container. Viewing or refreshing the page does not generate a report, train a model, or change the registry.
 
 The dashboard shows unique prediction times, the required sample size, reference rows, removed duplicates, and the saved snapshot time. With sufficient data, it displays per-column distances and the saved Evidently HTML report. Insufficient data, missing results, running or failed attempts, and storage errors have distinct messages. A latest failed or unfinished attempt hides earlier results; incompatible or inconsistent saved summaries are rejected. Snapshots older than 24 hours and snapshots reaching the request limit carry warnings. A lack of detected drift is not displayed as proof of prediction quality.
 
-After collecting predictions, run the `monitor` command above and select **Refresh saved results** to load that snapshot. Report scheduling is not implemented. `STEEL_ENERGY_DASHBOARD_PORT` changes the local Compose port. For development outside Docker:
+After collecting predictions, the monitor service updates the saved snapshot on its next check. Select **Refresh saved results** to load it; this button does not itself run monitoring. The manual `monitor` command remains available. `STEEL_ENERGY_DASHBOARD_PORT` changes the local Compose port. For development outside Docker:
 
 ```bash
 STEEL_ENERGY_WORKSPACE=artifacts/mlflow streamlit run dashboard/app.py --browser.gatherUsageStats=false
@@ -327,7 +349,7 @@ docker compose down
 
 `down` removes this project's containers and network while retaining its named volume. Starting again restores access to persisted models and completed jobs. Adding `--volumes` would delete that state. API shutdown allows up to 120 seconds for its worker to finish; an interrupted job can be reconciled from its durable record after startup.
 
-The image uses a digest-pinned Python 3.12 base and the pinned application dependencies. Only the one-shot volume ownership service runs as root. This is a local, single-host SQLite deployment with one API worker, one admitted training job, and a read-only monitoring dashboard; distributed coordination, a shared artifact store, and report scheduling remain future work.
+The image uses a digest-pinned Python 3.12 base and the pinned application dependencies. Only the one-shot volume ownership service runs as root. This is a local, single-host SQLite deployment with one API worker, one admitted training job, automatic monitoring, and a read-only dashboard; distributed coordination and a shared artifact store remain future work.
 
 **MLflow Projects entry points**
 
@@ -425,8 +447,8 @@ The tests cover invalid data, chronological isolation, feature leakage, reproduc
 | Experiment tracking | MLflow Projects, artifacts, reloadable models, registry | Implemented locally |
 | Model management | Candidate comparison and promotion safeguards | Implemented locally |
 | Serving | Version-pinned prediction, isolated training jobs, status queries, request records | Training and prediction APIs implemented locally |
-| Monitoring | Version-scoped Evidently reports from prediction artifacts | Reports and Streamlit presentation implemented locally |
-| Runtime | Docker image, single Compose startup, persistent model/data/job state | Implemented locally for API, MLflow, and Streamlit |
+| Monitoring | Version-scoped Evidently reports from prediction artifacts | Automatic refresh and Streamlit presentation implemented locally |
+| Runtime | Docker image, single Compose startup, persistent model/data/job state | Implemented locally for API, MLflow, monitoring worker, and Streamlit |
 | Quality | Tests, coverage, Flake8, Pyright, pre-commit, GitHub Actions | Implemented for current application code |
 | Optional extension | Airflow orchestration and full-dataset analysis | Planned |
 
