@@ -130,34 +130,3 @@ def fit_candidates(
         for left, right in folds
     ]
     return candidates, windows
-
-
-@dataclass(frozen=True)
-class PromotionDecision:
-    eligible: bool
-    reason: str
-
-
-def promotion_decision(
-    candidate: ErrorMetrics,
-    baseline_mae: float,
-    baseline_rmse: float,
-    incumbent: ErrorMetrics | None = None,
-    minimum_improvement: float = 0.01,
-) -> PromotionDecision:
-    values = [candidate.mae, candidate.rmse, baseline_mae, baseline_rmse]
-    if incumbent is not None:
-        values.extend([incumbent.mae, incumbent.rmse])
-    if not 0 <= minimum_improvement < 1 or any(not np.isfinite(value) or value < 0 for value in values):
-        raise DataValidationError("Promotion requires finite non-negative errors and improvement in [0, 1).")
-    if candidate.mae >= baseline_mae or candidate.mae > baseline_mae * (1 - minimum_improvement):
-        return PromotionDecision(False, "baseline_mae_not_improved")
-    if candidate.rmse > baseline_rmse:
-        return PromotionDecision(False, "baseline_rmse_worse")
-    if incumbent is None:
-        return PromotionDecision(True, "initial_champion")
-    if candidate.mae >= incumbent.mae or candidate.mae > incumbent.mae * (1 - minimum_improvement):
-        return PromotionDecision(False, "incumbent_mae_not_improved")
-    if candidate.rmse > incumbent.rmse:
-        return PromotionDecision(False, "incumbent_rmse_worse")
-    return PromotionDecision(True, "improved_champion")

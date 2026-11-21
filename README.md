@@ -93,7 +93,7 @@ Run `steel-energy evaluate` after preparation and initial training. This compare
 
 The forest **does not beat the schedule median on validation MAE**: its error is 0.207 kWh higher per observation, although its RMSE and 95th-percentile absolute error are lower. The forest remains the winner under the original training-CV selection rule. These descriptive validation differences do not establish statistical significance or justify silently changing the selected model after seeing validation results. The 48.6% improvement over a constant median does not demonstrate incremental MAE value over a schedule-aware reference.
 
-The original promotion gate still compares against constant baselines and the incumbent; it does **not** yet enforce superiority over these schedule references. Adding that requirement and deciding how MAE versus large errors should affect promotion requires an explicit policy revision before further model development. This diagnostic command does not register models or change the serving alias.
+The first experiments used a gate against constant baselines and the incumbent. After these diagnostics, promotion was explicitly revised to **`calendar-reference-v2`**: a candidate must improve MAE by at least 1% and have no greater RMSE against **each** of the four fixed references (constant mean/median and weekday/hour mean/median), plus the incumbent when present. MAE remains primary and RMSE acts as a guard against worse large errors. The diagnostic command itself does not register models or change the serving alias. Existing version 1 remains available as a legacy model; it has not been certified under the revised policy.
 
 The observed high-consumption band, defined as actual usage above the **training** 75th percentile of 53.97 kWh, contains 144 validation observations. The forest's MAE in this band is **22.10 kWh**, and its average signed error is **-11.61 kWh** (prediction minus actual): it underestimates this band on average. Across all validation observations, its largest absolute error is 80.67 kWh. These cases warrant investigation; calendar inputs alone cannot identify their operational cause.
 
@@ -123,16 +123,22 @@ Each training operation records:
 - A parent run and one nested run per model family, including CV trials, parameters, validation metrics, and predictions.
 - Serialized, reloadable sklearn pipelines with input examples, signatures, feature contracts, and exact model dependency versions.
 - The preparation manifest, data hashes, training reference data, Git revision/dirty state, and a snapshot of the application source.
-- The selected candidate's registry version and a machine-readable promotion decision. Every selected candidate is retained, including rejected ones.
+- The selected candidate's registry version, promotion policy version, and a machine-readable decision. Every selected candidate is retained, including rejected ones. `promotion_decision.json` records every reference's errors, allowed limits, and both pass/fail checks; the first failed check supplies the concise rejection reason.
+- Train-only weekday/hour reference predictions, their validation errors, and fallback counts. These deterministic references are mandatory checks, not additional selectable learned candidates.
 
 Ridge uses a square-root target with a square inverse transformation; random forests average non-negative targets; boosted trees use a Poisson loss. The workflow checks all outputs for finite, non-negative consumption values. No final test targets are loaded by training or candidate selection.
 
-**Promotion policy, fixed before the first real experiment**
+**Current promotion policy: `calendar-reference-v2`**
 
-1. The CV-selected candidate must improve validation MAE by at least 1% over the better mean/median baseline, while its RMSE is no worse than the mean baseline's RMSE.
-2. When a champion exists, it is reloaded and re-evaluated on exactly the same current validation observations. The candidate must also improve its MAE by at least 1%, with no RMSE degradation.
+1. The learned candidate is still selected only by training CV MAE. Its validation MAE must be at least 1% lower than **each** constant mean, constant median, weekday/hour mean, and weekday/hour median reference. Its RMSE must not exceed any reference's RMSE. Both schedule references are fitted only on training observations with the same fixed backoff as diagnostics; none is selected or dropped based on validation performance.
+2. When a champion exists, it is reloaded and re-evaluated on exactly the same current validation observations. The candidate must additionally improve its MAE by at least 1%, with no RMSE degradation. Every reference and incumbent check is recorded, even if another check already rejects the candidate.
 3. Feature compatibility and training cutoff provenance must match the evaluation protocol. Comparison fails closed if the incumbent has already trained on the proposed validation period.
 4. Only after training, validation, artifact logging, and registration finish can the `champion` alias change. A rejected candidate leaves the current champion in place.
+5. The 1% improvement is a policy floor: `--minimum-improvement` may make the requirement stricter but must be at least `0.01` and less than `1`. Exact 1% improvement and equal RMSE pass. A zero-MAE reference cannot be strictly improved, so it prevents promotion. Missing references and invalid errors cause failure rather than a partial comparison.
+
+The original constant-baseline policy was fixed before the first real experiment; version 2 is an explicit revision following validation diagnostics, not a claim that this stronger rule was predeclared. Each new run and candidate version records its policy ID and threshold. Existing untagged champions are reported as `legacy-v1` and remain available until a new candidate passes; the code does not retroactively mark them as version-2 approvals.
+
+Under version 2, the observed schedule-median MAE of 10.3739 kWh requires candidate MAE of at most **10.270161 kWh**, together with all other checks. The unchanged forest's 10.5807 kWh therefore does not qualify for a new promotion. A first candidate may also be registered without receiving a `champion` alias; subsequent training can retry normally, and prediction reports that no validated champion is available.
 
 The 1% threshold is an operational gate, not a statistical significance claim or a guarantee of future performance. Repeated experimentation must not turn the fixed validation partition into an unlimited tuning set. The untouched final test partition is reserved for the eventual final assessment.
 

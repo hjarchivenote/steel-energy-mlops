@@ -1,6 +1,7 @@
 """Train, record, validate, and conditionally promote model versions."""
 
 import subprocess
+from dataclasses import asdict
 from datetime import datetime
 from importlib.metadata import version as package_version
 from pathlib import Path
@@ -18,7 +19,9 @@ from threadpoolctl import threadpool_limits
 from steel_energy_mlops.data import DataValidationError
 from steel_energy_mlops.features import FEATURE_NAMES
 from steel_energy_mlops.modeling import BASELINES, LEARNED_FAMILIES, ErrorMetrics, error_metrics, fit_candidates
-from steel_energy_mlops.modeling import promotion_decision
+from steel_energy_mlops.promotion import MINIMUM_IMPROVEMENT, PROMOTION_POLICY, REQUIRED_REFERENCES
+from steel_energy_mlops.promotion import promotion_decision, validate_improvement
+from steel_energy_mlops.seasonal import LEVEL_NAMES, PROFILE_STATISTICS, fit_schedule_profile
 from steel_energy_mlops.tracking import DEFAULT_MODEL, DEFAULT_WORKSPACE, champion_version, open_store
 from steel_energy_mlops.tracking import require_compatible_version, validate_model_name
 from steel_energy_mlops.training_data import FEATURE_CONTRACT, TrainingData, load_training_data
@@ -30,12 +33,11 @@ def train_models(
     model_name: str = DEFAULT_MODEL,
     families: tuple[str, ...] = LEARNED_FAMILIES,
     forest_trees: int = 100,
-    minimum_improvement: float = 0.01,
+    minimum_improvement: float = MINIMUM_IMPROVEMENT,
     seed: int = 42,
 ) -> dict[str, Any]:
     validate_model_name(model_name)
-    if not 0 <= minimum_improvement < 1:
-        raise DataValidationError("Minimum improvement must be a fraction in [0, 1).")
+    validate_improvement(minimum_improvement)
     data = load_training_data(directory)
     workspace.mkdir(parents=True, exist_ok=True)
     try:
@@ -79,6 +81,7 @@ def _train_locked(
         mlflow.log_params({
             "feature_contract": FEATURE_CONTRACT, "seed": seed, "forest_trees": forest_trees,
             "minimum_improvement": minimum_improvement, "candidate_families": ",".join(families),
+            "promotion_policy": PROMOTION_POLICY,
             "train_sha256": data.train.sha256, "validation_sha256": data.validation.sha256,
             **_git_provenance(),
             "source_sha256": data.manifest["source"]["sha256"],
@@ -116,10 +119,34 @@ def _train_locked(
                     metadata={"feature_contract": FEATURE_CONTRACT, "feature_names": list(FEATURE_NAMES)},
                 )
                 models[candidate.name] = model.model_uri
-        decision = promotion_decision(
-            metrics[selected.name], min(metrics[name].mae for name in BASELINES), metrics["dummy_mean"].rmse,
-            incumbent_metrics, minimum_improvement,
-        )
+        reference_predictions = pd.DataFrame({
+            "timestamp": [stamp.isoformat() for stamp in data.validation.timestamps],
+            "actual_kwh": data.validation.target,
+        })
+        support_counts = {}
+        for statistic in PROFILE_STATISTICS:
+            name = f"weekday_hour_{statistic}"
+            profile = fit_schedule_profile(data.train, statistic)
+            predictions, support_counts[name] = profile.predict(data.validation.timestamps)
+            metrics[name] = error_metrics(data.validation.target, predictions)
+            reference_predictions[f"{name}_predicted_kwh"] = predictions
+            mlflow.log_metrics({f"{name}_validation_mae": metrics[name].mae,
+                                f"{name}_validation_rmse": metrics[name].rmse})
+        mlflow.log_text(reference_predictions.to_csv(index=False), "validation/schedule_reference_predictions.csv")
+        mlflow.log_dict({"fitted_on": "train_only", "backoff": list(LEVEL_NAMES), "support_counts": support_counts},
+                        "validation/schedule_reference_metadata.json")
+        references = {name: metrics[name] for name in REQUIRED_REFERENCES}
+        decision = promotion_decision(metrics[selected.name], references, incumbent_metrics, minimum_improvement)
+        policy = {
+            "id": PROMOTION_POLICY, "primary_metric": "validation_mae",
+            "minimum_improvement": minimum_improvement, "minimum_allowed_improvement": MINIMUM_IMPROVEMENT,
+            "required_references": list(REQUIRED_REFERENCES),
+            "mae_rule": "strictly lower and at least the minimum relative improvement against every comparison",
+            "rmse_rule": "no increase against any reference or the incumbent",
+            "candidate": metrics[selected.name].as_dict(), "checks": [asdict(check) for check in decision.checks],
+        }
+        mlflow.log_dict({"eligible": decision.eligible, "reason": decision.reason, "policy": policy},
+                        "promotion_decision.json")
         mlflow.log_metrics({
             "selected_cv_mae": selected.cv_mae,
             "selected_validation_mae": metrics[selected.name].mae,
@@ -135,12 +162,16 @@ def _train_locked(
             "train_last_timestamp": data.train.timestamps[-1].isoformat(),
             "train_sha256": data.train.sha256, "validation_sha256": data.validation.sha256,
             "selection": "training_elapsed_time_cv_mae", "gate_reason": decision.reason,
+            "promotion_policy": PROMOTION_POLICY, "minimum_improvement": str(minimum_improvement),
         })
         summary = {
             "run_id": run.info.run_id, "model_name": model_name, "selected_family": selected.name,
             "selection_basis": "training_elapsed_time_cv_mae", "candidate_version": str(registered.version),
             "previous_champion_version": None if incumbent_version is None else str(incumbent_version.version),
             "promotion_eligible": decision.eligible, "reason": decision.reason,
+            "promotion_policy": policy,
+            "previous_champion_policy": None if incumbent_version is None else incumbent_version.tags.get(
+                "promotion_policy", "legacy-v1"),
             "incumbent_validation": None if incumbent_metrics is None else incumbent_metrics.as_dict(),
             "comparison": [{"family": item.name, "cv_mae": item.cv_mae,
                             "validation": metrics[item.name].as_dict(), "parameters": item.parameters,
@@ -150,7 +181,8 @@ def _train_locked(
         }
         mlflow.log_dict(summary, "training_summary.json")
         mlflow.set_tags({"selected_family": selected.name, "promotion_eligible": str(decision.eligible),
-                         "gate_reason": decision.reason, "test_evaluated": "false"})
+                         "gate_reason": decision.reason, "test_evaluated": "false",
+                         "promotion_policy": PROMOTION_POLICY})
     # All training and artifact writes finish before the serving alias can change.
     if decision.eligible:
         client.set_registered_model_alias(model_name, "champion", registered.version)

@@ -15,6 +15,7 @@ from steel_energy_mlops.evaluation import evaluate_champion
 from steel_energy_mlops.modeling import LEARNED_FAMILIES
 from steel_energy_mlops.prediction import predict_consumption
 from steel_energy_mlops.preparation import prepare_dataset
+from steel_energy_mlops.promotion import MINIMUM_IMPROVEMENT
 from steel_energy_mlops.tracking import DEFAULT_MODEL, DEFAULT_WORKSPACE
 from steel_energy_mlops.training import train_models
 
@@ -34,7 +35,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
     train.add_argument("--model-name", default=DEFAULT_MODEL)
     train.add_argument("--families", nargs="+", choices=LEARNED_FAMILIES, default=list(LEARNED_FAMILIES))
     train.add_argument("--forest-trees", type=int, default=100)
-    train.add_argument("--minimum-improvement", type=float, default=0.01)
+    train.add_argument("--minimum-improvement", type=float, default=MINIMUM_IMPROVEMENT,
+                       help="Required relative MAE improvement; at least 0.01 (1%%), and less than 1")
     train.add_argument("--seed", type=int, default=42)
     predict = commands.add_parser("predict", help="Predict with one pinned, validated champion version")
     predict.add_argument("--timestamp", type=datetime.fromisoformat, action="append", required=True)

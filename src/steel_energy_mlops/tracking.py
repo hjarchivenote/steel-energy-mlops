@@ -41,11 +41,17 @@ def validate_model_name(name: str) -> None:
 
 def champion_version(client: MlflowClient, name: str) -> ModelVersion | None:
     try:
-        return client.get_model_version_by_alias(name, "champion")
+        registered = client.get_registered_model(name)
     except MlflowException as exc:
         if exc.error_code != "RESOURCE_DOES_NOT_EXIST":
             raise
         return None
+    # A rejected first candidate creates a registry entry without a serving alias.
+    # Read the mapping explicitly: MLflow can report a missing alias as INVALID_PARAMETER_VALUE.
+    version = registered.aliases.get("champion")
+    if version is None:
+        return None
+    return client.get_model_version(name, version)
 
 
 def require_compatible_version(version: ModelVersion) -> None:

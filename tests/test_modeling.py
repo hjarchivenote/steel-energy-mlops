@@ -6,7 +6,7 @@ import pytest
 
 from steel_energy_mlops.data import DataValidationError
 from steel_energy_mlops.modeling import (
-    BASELINES, LEARNED_FAMILIES, ErrorMetrics, calendar_folds, error_metrics, fit_candidates, promotion_decision,
+    BASELINES, LEARNED_FAMILIES, calendar_folds, error_metrics, fit_candidates,
 )
 from steel_energy_mlops.training_data import load_training_data
 
@@ -75,34 +75,3 @@ def test_rejects_invalid_family_selection(prepared_training: Path, families: tup
 def test_rejects_invalid_training_limits(prepared_training: Path, trees: int, seed: int) -> None:
     with pytest.raises(DataValidationError, match="Forest trees"):
         fit_candidates(load_training_data(prepared_training).train, forest_trees=trees, seed=seed)
-
-
-@pytest.mark.parametrize(
-    ("candidate", "baseline_mae", "baseline_rmse", "incumbent", "reason", "eligible"),
-    [
-        (ErrorMetrics(10, 10), 10, 15, None, "baseline_mae_not_improved", False),
-        (ErrorMetrics(9.95, 10), 10, 15, None, "baseline_mae_not_improved", False),
-        (ErrorMetrics(9, 16), 10, 15, None, "baseline_rmse_worse", False),
-        (ErrorMetrics(9, 10), 10, 15, None, "initial_champion", True),
-        (ErrorMetrics(9, 10), 10, 15, ErrorMetrics(9, 12), "incumbent_mae_not_improved", False),
-        (ErrorMetrics(8.99, 10), 10, 15, ErrorMetrics(9, 12), "incumbent_mae_not_improved", False),
-        (ErrorMetrics(8, 11), 10, 15, ErrorMetrics(9, 10), "incumbent_rmse_worse", False),
-        (ErrorMetrics(8, 10), 10, 15, ErrorMetrics(9, 10), "improved_champion", True),
-        (ErrorMetrics(0, 0), 0, 0, None, "baseline_mae_not_improved", False),
-    ],
-)
-def test_promotion_gate(candidate, baseline_mae, baseline_rmse, incumbent, reason, eligible) -> None:
-    decision = promotion_decision(candidate, baseline_mae, baseline_rmse, incumbent)
-    assert decision.reason == reason and decision.eligible is eligible
-
-
-@pytest.mark.parametrize("improvement", [-0.1, 1.0, float("nan")])
-def test_rejects_invalid_gate_threshold(improvement: float) -> None:
-    with pytest.raises(DataValidationError):
-        promotion_decision(ErrorMetrics(1, 1), 2, 2, minimum_improvement=improvement)
-
-
-@pytest.mark.parametrize("errors", [ErrorMetrics(float("nan"), 1), ErrorMetrics(-1, 1)])
-def test_rejects_invalid_gate_metrics(errors: ErrorMetrics) -> None:
-    with pytest.raises(DataValidationError):
-        promotion_decision(errors, 2, 2)
