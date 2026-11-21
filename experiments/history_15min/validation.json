@@ -1,0 +1,177 @@
+{
+  "run_id": "3ff1b50d2cc74358b0ef5889e89039b4",
+  "plan": {
+    "created_at": "2026-11-14T17:14:17.101039+00:00",
+    "selection_run_id": "5fc6a173bd9c4d3b8bc6c2e8b603e030",
+    "selection_artifact_sha256": "aa4f9ca0e79b4e6c2fbee99766114e2cc323ec0c2d8d2da4e94b94f22c4f7117",
+    "train_sha256": "b579af97cbd4c0bf5f4d8c11ac27175d7936eb40fdaaca36b960e52f78873941",
+    "context_source_sha256": "9b1cee6f9cb9cd9df2b95814ca90a9a2ff15b7f5f1fba0fae3c643e82072eacc",
+    "candidate": {
+      "loss": "squared_error",
+      "max_iter": 200,
+      "max_leaf_nodes": 15,
+      "l2_regularization": 1.0,
+      "early_stopping": false,
+      "random_state": 42
+    },
+    "reporting_delay_minutes": 15,
+    "forecast_horizon_minutes": 15,
+    "availability_is_simulated": true,
+    "midnight_policy": "Source lists each 00:00 row after the same date 23:45. Exclude these labels from fitting and history; retain every evaluation target with a common calendar-profile fallback and make no short-horizon claim for midnight.",
+    "checks": {
+      "mae_improvement_over_both_controls": 0.01,
+      "rmse_and_p95_no_increase": true,
+      "high_usage_mae_no_increase": true,
+      "absolute_high_bias_reduction_over_both": 0.1
+    },
+    "validation_rule": "Fixed 750 targets, once; no selection or refit from validation outcomes.",
+    "controls": [
+      "matched calendar forest",
+      "last available usage persistence"
+    ],
+    "extra_diagnostics": [
+      "first/second temporal half",
+      "non-midnight targets"
+    ],
+    "final_test_evaluated": false,
+    "registry_mutated": false
+  },
+  "validation_sha256": "4b4633ce4af915df2d51ffc1a82b58fcebe53d913550bb35d4d4bec8278cd6ac",
+  "fitted_label_rows": 3457,
+  "target_rows": 750,
+  "midnight_fallback_targets": 9,
+  "high_usage_cutoff": 54.22,
+  "scores": {
+    "calendar": {
+      "rows": 750,
+      "mae": 10.073906866666666,
+      "rmse": 19.455596632548435,
+      "p95_absolute_error": 49.17535000000001,
+      "high_usage_rows": 140,
+      "high_usage_mae": 21.83208857142857,
+      "high_usage_bias": -14.24415285714286
+    },
+    "persistence": {
+      "rows": 750,
+      "mae": 7.8716474666666665,
+      "rmse": 17.34285639270763,
+      "p95_absolute_error": 39.309999999999995,
+      "high_usage_rows": 140,
+      "high_usage_mae": 20.809142857142856,
+      "high_usage_bias": -11.383714285714284
+    },
+    "candidate": {
+      "rows": 750,
+      "mae": 6.730018854827963,
+      "rmse": 13.032439101873848,
+      "p95_absolute_error": 29.174912317376887,
+      "high_usage_rows": 140,
+      "high_usage_mae": 17.327811431830447,
+      "high_usage_bias": -3.719564733959438
+    }
+  },
+  "checks": {
+    "calendar_mae": true,
+    "calendar_rmse": true,
+    "calendar_p95": true,
+    "calendar_high_mae": true,
+    "calendar_high_bias": true,
+    "persistence_mae": true,
+    "persistence_rmse": true,
+    "persistence_p95": true,
+    "persistence_high_mae": true,
+    "persistence_high_bias": true
+  },
+  "eligible_for_further_development": true,
+  "diagnostics": {
+    "first_half": {
+      "calendar": {
+        "rows": 375,
+        "mae": 11.330789066666664,
+        "rmse": 21.198986076454695,
+        "p95_absolute_error": 52.45449500000007,
+        "high_usage_rows": 47,
+        "high_usage_mae": 22.842161702127658,
+        "high_usage_bias": -11.918319148936172
+      },
+      "persistence": {
+        "rows": 375,
+        "mae": 6.571112799999999,
+        "rmse": 15.236685656276652,
+        "p95_absolute_error": 37.87300000000001,
+        "high_usage_rows": 47,
+        "high_usage_mae": 21.47978723404255,
+        "high_usage_bias": -8.731702127659572
+      },
+      "candidate": {
+        "rows": 375,
+        "mae": 5.877739455816382,
+        "rmse": 11.845687506479928,
+        "p95_absolute_error": 27.185809901631316,
+        "high_usage_rows": 47,
+        "high_usage_mae": 16.560817166544595,
+        "high_usage_bias": -4.582302858577354
+      }
+    },
+    "second_half": {
+      "calendar": {
+        "rows": 375,
+        "mae": 8.817024666666667,
+        "rmse": 17.539768242115972,
+        "p95_absolute_error": 46.17107999999999,
+        "high_usage_rows": 93,
+        "high_usage_mae": 21.321621505376342,
+        "high_usage_bias": -15.41957419354839
+      },
+      "persistence": {
+        "rows": 375,
+        "mae": 9.172182133333333,
+        "rmse": 19.219592761761977,
+        "p95_absolute_error": 44.001000000000026,
+        "high_usage_rows": 93,
+        "high_usage_mae": 20.47021505376344,
+        "high_usage_bias": -12.723978494623655
+      },
+      "candidate": {
+        "rows": 375,
+        "mae": 7.582298253839545,
+        "rmse": 14.119795515053545,
+        "p95_absolute_error": 31.093079586810312,
+        "high_usage_rows": 93,
+        "high_usage_mae": 17.715432189555557,
+        "high_usage_bias": -3.283557294636406
+      }
+    },
+    "non_midnight": {
+      "calendar": {
+        "rows": 741,
+        "mae": 10.19001963562753,
+        "rmse": 19.57320688087593,
+        "p95_absolute_error": 49.214050000000015,
+        "high_usage_rows": 140,
+        "high_usage_mae": 21.83208857142857,
+        "high_usage_bias": -14.24415285714286
+      },
+      "persistence": {
+        "rows": 741,
+        "mae": 7.961012145748987,
+        "rmse": 17.447652475994495,
+        "p95_absolute_error": 39.309999999999995,
+        "high_usage_rows": 140,
+        "high_usage_mae": 20.809142857142856,
+        "high_usage_bias": -11.383714285714284
+      },
+      "candidate": {
+        "rows": 741,
+        "mae": 6.805517599353538,
+        "rmse": 13.111069089822832,
+        "p95_absolute_error": 29.589853435266917,
+        "high_usage_rows": 140,
+        "high_usage_mae": 17.327811431830447,
+        "high_usage_bias": -3.719564733959438
+      }
+    }
+  },
+  "final_test_evaluated": false,
+  "registry_mutated": false
+}

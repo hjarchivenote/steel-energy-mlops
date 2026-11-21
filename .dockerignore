@@ -1,0 +1,10 @@
+**
+!Dockerfile
+!requirements.txt
+!pyproject.toml
+!README.md
+!src/
+!src/steel_energy_mlops/
+!src/steel_energy_mlops/*.py
+!dashboard/
+!dashboard/app.py

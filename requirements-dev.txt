@@ -7,3 +7,4 @@ pyright==1.1.414
 pytest==9.2.0
 setuptools==84.2.1
 wheel==0.48.0
+httpx2==2.16.0

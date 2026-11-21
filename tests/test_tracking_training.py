@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -17,9 +17,12 @@ from steel_energy_mlops.cli import main
 from steel_energy_mlops.data import DataValidationError
 from steel_energy_mlops.features import calendar_features
 from steel_energy_mlops.prediction import predict_consumption
+from steel_energy_mlops.promotion import PROMOTION_POLICY, REQUIRED_REFERENCES, PromotionDecision
+from steel_energy_mlops.promotion import TailDecision, TailMetrics
+from steel_energy_mlops.preparation import prepare_dataset
 from steel_energy_mlops.tracking import champion_version, open_store, validate_model_name
 from steel_energy_mlops.training import train_models
-from tests.helpers import make_training_data
+from tests.helpers import make_row, make_training_data, write_csv
 
 
 @pytest.fixture(scope="module")
@@ -38,11 +41,26 @@ def test_real_mlflow_artifacts_and_model_roundtrips(training_session: dict[str, 
     client, _ = open_store(session["workspace"], "steel-energy-training")
     run = client.get_run(result["run_id"])
     assert run.info.status == "FINISHED"
+    children = client.search_runs([run.info.experiment_id],
+                                  filter_string=f"tags.mlflow.parentRunId = '{result['run_id']}'")
+    assert len(children) == len(result["comparison"])
+    for child in children:
+        assert child.info.status == "FINISHED"
+        assert child.info.artifact_uri.startswith((session["workspace"] / "artifacts").as_uri() + "/")
+        trials = client.download_artifacts(child.info.run_id, "cross_validation.json")
+        assert isinstance(json.loads(Path(trials).read_text())["trials"], list)
     assert run.data.tags["test_evaluated"] == "false"
+    assert run.data.tags["promotion_policy"] == PROMOTION_POLICY
     assert run.data.metrics["selected_validation_mae"] < run.data.metrics["baseline_median_validation_mae"]
     assert result["selected_family"] == "ridge"
     summary_path = client.download_artifacts(result["run_id"], "training_summary.json")
     assert json.loads(Path(summary_path).read_text())["promotion_eligible"] is True
+    decision_path = client.download_artifacts(result["run_id"], "promotion_decision.json")
+    decision = json.loads(Path(decision_path).read_text())
+    assert decision["policy"] == result["promotion_policy"]
+    assert decision["policy"]["required_references"] == list(REQUIRED_REFERENCES)
+    assert all(check["mae_passed"] and check["rmse_passed"] for check in decision["policy"]["checks"])
+    assert champion_version(client, session["model_name"]).tags["promotion_policy"] == PROMOTION_POLICY
     features = np.asarray([calendar_features(datetime(2018, 1, 2, 12))], dtype=np.float64)
     for row in result["comparison"]:
         model = load_model(row["model_uri"])
@@ -61,6 +79,21 @@ def test_identical_candidate_is_rejected_without_replacing_champion(training_ses
     assert result["candidate_version"] != before
     assert result["previous_champion_version"] == before
     assert str(champion_version(client, session["model_name"]).version) == str(before)
+
+
+def test_tail_veto_preserves_champion_even_when_mae_and_rmse_checks_pass(training_session, monkeypatch) -> None:
+    session = training_session
+    client, _ = open_store(session["workspace"], "steel-energy-training")
+    previous = champion_version(client, session["model_name"]).version
+    monkeypatch.setattr(training, "promotion_decision", lambda *args: PromotionDecision(True, "improved_champion", ()))
+    veto = TailDecision(False, "incumbent_high_usage_bias_worse", 50., 100,
+                        TailMetrics(20., 12., -10.), TailMetrics(21., 13., -8.))
+    monkeypatch.setattr(training, "tail_promotion_decision", lambda *args: veto)
+    result = train_models(session["directory"], session["workspace"], session["model_name"], families=("ridge",))
+    assert result["promoted"] is False and result["reason"] == "incumbent_high_usage_bias_worse"
+    assert champion_version(client, session["model_name"]).version == previous
+    saved = json.loads(Path(client.download_artifacts(result["run_id"], "promotion_decision.json")).read_text())
+    assert saved["policy"]["tail_guard"]["eligible"] is False
 
 
 def test_prediction_logs_exact_request_and_response(training_session: dict[str, Any]) -> None:
@@ -100,13 +133,14 @@ def test_rejects_invalid_registry_names(name: str) -> None:
         validate_model_name(name)
 
 
-def test_registry_errors_are_not_treated_as_missing_models(training_session, monkeypatch) -> None:
+@pytest.mark.parametrize("operation", ["get_registered_model", "get_model_version"])
+def test_registry_errors_are_not_treated_as_missing_models(training_session, monkeypatch, operation) -> None:
     client, _ = open_store(training_session["workspace"], "steel-energy-training")
 
     def fail(*args, **kwargs):
         raise MlflowException("backend unavailable")
 
-    monkeypatch.setattr(client, "get_model_version_by_alias", fail)
+    monkeypatch.setattr(client, operation, fail)
     with pytest.raises(MlflowException, match="backend unavailable"):
         champion_version(client, "test-calendar")
 
@@ -118,9 +152,10 @@ def test_concurrent_training_is_refused_before_mutation(training_session) -> Non
             train_models(session["directory"], session["workspace"], session["model_name"])
 
 
-def test_invalid_threshold_is_refused_before_loading_data(tmp_path: Path) -> None:
+@pytest.mark.parametrize("threshold", [0, 0.005, 1, float("nan")])
+def test_invalid_threshold_is_refused_before_loading_data(tmp_path: Path, threshold: float) -> None:
     with pytest.raises(DataValidationError, match="Minimum improvement"):
-        train_models(tmp_path / "missing", minimum_improvement=1)
+        train_models(tmp_path / "missing", minimum_improvement=threshold)
 
 
 def test_optional_git_metadata_without_repository(tmp_path: Path, monkeypatch) -> None:
@@ -216,3 +251,72 @@ def test_training_and_prediction_cli(training_session, capsys) -> None:
                    "--model-name", "cli-model"])
     assert result == 0
     assert json.loads(capsys.readouterr().out)["model_version"] == outcome["candidate_version"]
+
+
+def test_schedule_veto_rejects_a_candidate_that_beats_constant_baselines(tmp_path: Path) -> None:
+    # Repeating hourly observations make a train-only weekday/hour reference exactly correct.
+    rows = [make_row(datetime(2018, 1, 1) + timedelta(hours=index),
+                     (8 + 2 * np.sin(2 * np.pi * (index % 24) / 24)) ** 2) for index in range(672)]
+    source = write_csv(tmp_path / "periodic.csv", rows)
+    directory = tmp_path / "prepared"
+    prepare_dataset(source, directory, expected_rows=672)
+    (directory / "test.csv").unlink()
+    workspace = tmp_path / "tracking"
+    result = train_models(directory, workspace, "periodic-model", families=("ridge",))
+    assert result["promoted"] is False
+    assert result["reason"] == "weekday_hour_mean_mae_not_improved"
+    assert result["previous_champion_version"] is None
+    checks = result["promotion_policy"]["checks"]
+    assert all(check["mae_passed"] and check["rmse_passed"] for check in checks[:2])
+    assert all(not check["mae_passed"] for check in checks[2:])
+    assert result["test_evaluated"] is False
+    client, _ = open_store(workspace, "steel-energy-training")
+    assert champion_version(client, "periodic-model") is None
+    saved = client.download_artifacts(result["run_id"], "promotion_decision.json")
+    assert json.loads(Path(saved).read_text())["reason"] == result["reason"]
+    assert client.get_model_version("periodic-model", result["candidate_version"]).tags[
+        "promotion_policy"] == PROMOTION_POLICY
+    # A later job can evaluate another candidate even though no candidate has passed yet.
+    retry = train_models(directory, workspace, "periodic-model", families=("ridge",))
+    assert retry["promoted"] is False and retry["candidate_version"] != result["candidate_version"]
+    assert champion_version(client, "periodic-model") is None
+    with pytest.raises(DataValidationError, match="No validated champion"):
+        predict_consumption((datetime(2019, 1, 1),), workspace, "periodic-model")
+
+
+def test_failed_decision_logging_preserves_existing_champion(training_session, monkeypatch) -> None:
+    session = training_session
+    client, _ = open_store(session["workspace"], "steel-energy-training")
+    before = champion_version(client, session["model_name"]).version
+    original = training.mlflow.log_dict
+
+    def fail_at_decision(dictionary, artifact_file, **kwargs):
+        if artifact_file == "promotion_decision.json":
+            raise MlflowException("decision artifact failed")
+        return original(dictionary, artifact_file, **kwargs)
+
+    monkeypatch.setattr(training.mlflow, "log_dict", fail_at_decision)
+    with pytest.raises(MlflowException, match="decision artifact failed"):
+        train_models(session["directory"], session["workspace"], session["model_name"], families=("ridge",))
+    assert champion_version(client, session["model_name"]).version == before
+    assert mlflow.active_run() is None
+
+
+def test_failed_final_summary_cannot_promote_an_eligible_candidate(training_session, monkeypatch) -> None:
+    session = training_session
+    original = training.mlflow.log_dict
+
+    def fail_at_summary(dictionary, artifact_file, **kwargs):
+        if artifact_file == "training_summary.json":
+            assert dictionary["promotion_eligible"] is True
+            raise MlflowException("final summary failed")
+        return original(dictionary, artifact_file, **kwargs)
+
+    monkeypatch.setattr(training.mlflow, "log_dict", fail_at_summary)
+    with pytest.raises(MlflowException, match="final summary failed"):
+        train_models(session["directory"], session["workspace"], "failed-bootstrap", families=("ridge",))
+    client, _ = open_store(session["workspace"], "steel-energy-training")
+    assert champion_version(client, "failed-bootstrap") is None
+    versions = client.search_model_versions("name='failed-bootstrap'")
+    assert len(versions) == 1
+    assert mlflow.active_run() is None

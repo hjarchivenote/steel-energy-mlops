@@ -1,0 +1,121 @@
+name: steel-energy-mlops
+
+x-app: &app
+  image: ${COMPOSE_PROJECT_NAME}:local
+  pull_policy: never
+  init: true
+  volumes:
+    - runtime:/runtime
+
+services:
+  volume-init:
+    <<: *app
+    user: "0:0"
+    entrypoint: ["python", "-c", "import os; os.chown('/runtime', 10001, 10001)"]
+    restart: "no"
+
+  initialize:
+    <<: *app
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+    command:
+      - init-runtime
+      - --prepared-data
+      - /input
+      - --data
+      - /runtime/data/processed
+      - --workspace
+      - /runtime/mlflow
+      - --model-seed
+      - /seed/champion
+    volumes:
+      - runtime:/runtime
+      - type: bind
+        source: ${STEEL_ENERGY_PREPARED_DATA:-./data/processed}
+        target: /input
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${STEEL_ENERGY_MODEL_SEEDS:-./artifacts/deployment}
+        target: /seed
+        read_only: true
+        bind:
+          create_host_path: false
+    restart: "no"
+
+  api:
+    <<: *app
+    build: .
+    depends_on:
+      initialize:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${STEEL_ENERGY_API_PORT:-18000}:8000"
+    stop_grace_period: 120s
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/ready', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      start_period: 30s
+      retries: 6
+    restart: unless-stopped
+
+  monitor:
+    <<: *app
+    depends_on:
+      initialize:
+        condition: service_completed_successfully
+    command: ["watch-monitoring", "--data", "/runtime/data/processed", "--workspace", "/runtime/mlflow", "--interval-seconds", "${STEEL_ENERGY_MONITOR_INTERVAL_SECONDS:-60}"]
+    environment:
+      STEEL_ENERGY_MONITOR_INTERVAL_SECONDS: ${STEEL_ENERGY_MONITOR_INTERVAL_SECONDS:-60}
+    stop_grace_period: 120s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; from pathlib import Path; from steel_energy_mlops.monitoring_worker import monitoring_service_healthy; raise SystemExit(0 if monitoring_service_healthy(Path('/runtime/mlflow'), int(os.environ['STEEL_ENERGY_MONITOR_INTERVAL_SECONDS'])) else 1)"]
+      interval: 10s
+      timeout: 15s
+      start_period: 30s
+      retries: 6
+    restart: unless-stopped
+
+  dashboard:
+    <<: *app
+    depends_on:
+      initialize:
+        condition: service_completed_successfully
+    entrypoint: ["streamlit"]
+    command: ["run", "/app/dashboard/app.py", "--server.address=0.0.0.0", "--server.port=8501", "--server.headless=true", "--browser.gatherUsageStats=false", "--server.fileWatcherType=none"]
+    environment:
+      STEEL_ENERGY_WORKSPACE: /runtime/mlflow
+    volumes:
+      - runtime:/runtime:ro
+    ports:
+      - "127.0.0.1:${STEEL_ENERGY_DASHBOARD_PORT:-18501}:8501"
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8501/_stcore/health', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      start_period: 30s
+      retries: 6
+    restart: unless-stopped
+
+  mlflow:
+    <<: *app
+    depends_on:
+      initialize:
+        condition: service_completed_successfully
+    entrypoint: ["mlflow"]
+    command: ["ui", "--backend-store-uri", "sqlite:////runtime/mlflow/mlflow.db", "--host", "0.0.0.0", "--port", "5000", "--workers", "1"]
+    ports:
+      - "127.0.0.1:${STEEL_ENERGY_MLFLOW_PORT:-15001}:5000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:5000/health', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      start_period: 30s
+      retries: 6
+    restart: unless-stopped
+
+volumes:
+  runtime:

@@ -8,7 +8,7 @@ import pytest
 
 from steel_energy_mlops.data import TARGET, DataValidationError
 from steel_energy_mlops.features import FEATURE_NAMES, calendar_features
-from steel_energy_mlops.training_data import load_training_data
+from steel_energy_mlops.training_data import load_training_data, load_training_partition
 
 
 def rewrite_partition(directory: Path, name: str, frame: pd.DataFrame) -> None:
@@ -26,6 +26,21 @@ def test_training_does_not_open_final_test_data(prepared_training: Path) -> None
     assert loaded.train.features.shape == (112, 7)
     assert loaded.validation.features.shape == (24, 7)
     assert loaded.train.timestamps[-1] < loaded.validation.timestamps[0]
+
+
+def test_training_only_loader_does_not_require_holdout_files(prepared_training: Path) -> None:
+    (prepared_training / "validation.csv").unlink()
+    (prepared_training / "test.csv").unlink()
+    assert load_training_partition(prepared_training).features.shape == (112, 7)
+
+
+def test_missing_validation_metadata_is_reported(prepared_training: Path) -> None:
+    path = prepared_training / "manifest.json"
+    manifest = json.loads(path.read_text())
+    del manifest["splits"]["validation"]
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(DataValidationError, match="incomplete"):
+        load_training_data(prepared_training)
 
 
 def test_detects_artifact_tampering(prepared_training: Path) -> None:

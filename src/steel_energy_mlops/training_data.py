@@ -61,8 +61,7 @@ def _load_partition(directory: Path, name: str, metadata: dict[str, Any]) -> Par
     return Partition(features, target, timestamps, digest)
 
 
-def load_training_data(directory: Path) -> TrainingData:
-    """The fixed final test partition is intentionally not loaded or scored here."""
+def _load_manifest(directory: Path) -> dict[str, Any]:
     manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
     if not isinstance(manifest, dict):
         raise DataValidationError("Preparation manifest must be a JSON object.")
@@ -71,13 +70,32 @@ def load_training_data(directory: Path) -> TrainingData:
     source = manifest.get("source")
     if not isinstance(source, dict) or re.fullmatch(r"[0-9a-f]{64}", str(source.get("sha256", ""))) is None:
         raise DataValidationError("Preparation manifest must identify the source data with its SHA-256 hash.")
+    return manifest
+
+
+def _training_partition(directory: Path, manifest: dict[str, Any]) -> Partition:
     try:
         train = _load_partition(directory, "train", manifest["splits"]["train"])
+    except (KeyError, TypeError) as exc:
+        raise DataValidationError("Preparation manifest is incomplete.") from exc
+    if np.ptp(train.target) == 0:
+        raise DataValidationError("Training targets must vary before comparing learned models.")
+    return train
+
+
+def load_training_partition(directory: Path) -> Partition:
+    """Load only training observations for input audits and pre-validation experiments."""
+    return _training_partition(directory, _load_manifest(directory))
+
+
+def load_training_data(directory: Path) -> TrainingData:
+    """The fixed final test partition is intentionally not loaded or scored here."""
+    manifest = _load_manifest(directory)
+    train = _training_partition(directory, manifest)
+    try:
         validation = _load_partition(directory, "validation", manifest["splits"]["validation"])
     except (KeyError, TypeError) as exc:
         raise DataValidationError("Preparation manifest is incomplete.") from exc
     if train.timestamps[-1] >= validation.timestamps[0]:
         raise DataValidationError("Training observations must precede all validation observations.")
-    if np.ptp(train.target) == 0:
-        raise DataValidationError("Training targets must vary before comparing learned models.")
     return TrainingData(train, validation, manifest)

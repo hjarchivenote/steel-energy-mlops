@@ -16,3 +16,8 @@ entry_points:
       timestamp: str
       workspace: {type: str, default: artifacts/mlflow}
     command: python -m steel_energy_mlops predict --timestamp {timestamp} --workspace {workspace}
+  evaluate:
+    parameters:
+      data: {type: path, default: data/processed}
+      workspace: {type: str, default: artifacts/mlflow}
+    command: python -m steel_energy_mlops evaluate --data {data} --workspace {workspace}
