@@ -4,7 +4,7 @@ import json
 import os
 import subprocess
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -32,7 +32,7 @@ def test_compose_build_restore_predict_and_train(tmp_path, pytestconfig, monkeyp
     seeds = tmp_path / "seeds"
     export_champion(workspace, seeds / "champion")
     model = load_model(str(seeds / "champion/model"))
-    stamps = ["2019-01-07T10:00:00", "2019-01-07T10:15:00"]
+    stamps = [(datetime(2019, 1, 7, 10) + timedelta(minutes=15 * index)).isoformat() for index in range(100)]
     expected = model.predict(np.asarray([calendar_features(datetime.fromisoformat(stamp)) for stamp in stamps]))
     project = "steel-energy-smoke-" + uuid4().hex[:12]
     environment = {key: value for key, value in os.environ.items()
@@ -77,6 +77,13 @@ def test_compose_build_restore_predict_and_train(tmp_path, pytestconfig, monkeyp
                                    rtol=0, atol=1e-8)
         artifact = ui + "/get-artifact?" + urlencode({"run_id": prediction["run_id"], "path": "response.json"})
         assert request(artifact)[1] == prediction
+        monitored = json.loads(compose("exec", "-T", "api", "steel-energy", "monitor", "--workspace",
+                                       "/runtime/mlflow", "--data", "/runtime/data/processed").stdout)
+        assert monitored["unique_rows"] == 100 and monitored["html_artifact"]
+        assert monitored["status"] in ("distribution_changed", "no_drift_detected")
+        report_url = ui + "/get-artifact?" + urlencode({"run_id": monitored["run_id"], "path": "drift_report.html"})
+        with urlopen(report_url, timeout=20) as response:
+            assert response.status == 200 and b"<html" in response.read().lower()
         status, admission = request(api + "/train", {"families": ["ridge"]})
         assert status == 202
         job = wait_for_job(admission)

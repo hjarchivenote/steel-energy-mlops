@@ -6,7 +6,7 @@ This project uses measurements from a South Korean steel manufacturing facility 
 
 The repository supports an MLOps semester project at Óbuda University and will also serve as a portfolio project. The coursework uses a fixed 5,000-record sample; analysis of the complete dataset is a later extension within this same repository.
 
-> **Status: training and prediction APIs packaged with Docker Compose.** Data preparation, model comparison, MLflow tracking and registry, validation-based promotion, asynchronous training jobs, logged predictions, and a persistent container runtime are implemented. The monitoring dashboard remains to be implemented. Reported model errors below are validation results; final test evaluation remains reserved.
+> **Status: training and prediction APIs packaged with Docker Compose.** Data preparation, model comparison, MLflow tracking and registry, validation-based promotion, asynchronous training jobs, logged predictions, a persistent container runtime, and version-scoped Evidently reports are implemented. The Streamlit monitoring dashboard remains to be implemented. Reported model errors below are validation results; final test evaluation remains reserved.
 
 ## Project objective
 
@@ -240,6 +240,26 @@ Job state is atomically persisted in `job.json`, while the worker's result and d
 
 HTTP audit records include the training job ID and, after completion, its MLflow run ID. If HTTP audit writing fails after a job has already started, the response is `503` **with the admitted job ID and status URL**; inspect that job rather than assuming training did not start and submitting another job. The durable job record remains the admission record in this case.
 
+### Prediction distribution monitoring
+
+Generate a monitoring snapshot from the current champion's recent, successfully logged prediction requests:
+
+```bash
+steel-energy monitor --data data/processed --workspace artifacts/mlflow --lookback-hours 168 --max-runs 100
+```
+
+For the running Compose stack, use its own data and experiment store:
+
+```bash
+docker compose exec -T api steel-energy monitor --data /runtime/data/processed --workspace /runtime/mlflow
+```
+
+The operation pins one champion version, verifies its training checksum, and compares the training inputs and that same model's reference predictions with incoming `predictions.csv` artifacts. It selects only completed requests for the pinned model and version inside the request-time window. The default snapshot covers the newest 100 matching runs from the last seven days; `max-runs` is bounded at 1,000 and lookback at 720 hours. The summary identifies the selected run IDs, window, and whether the run limit was reached. Repeated target timestamps count once, retaining the newest request. Malformed artifacts fail the operation rather than being silently excluded.
+
+Both datasets need at least 100 rows after deduplicating current timestamps. Otherwise, the saved status is `insufficient_data`, without an Evidently drift verdict or HTML report. This is a conservative operational guard, not proof of statistical power. With sufficient data, Evidently uses normalized Wasserstein distance for numeric columns and Jensen–Shannon distance for `is_weekend`, with an explicit distance threshold of 0.1. Monitoring copies are rounded to 12 decimal places to prevent floating-point noise from breaking histograms for nearly constant calendar columns; prediction serving and original artifacts are unchanged.
+
+The `steel-energy-monitoring` experiment stores `monitoring_summary.json` and the deduplicated `current_predictions.csv`. Evaluated snapshots also contain `evidently.json` and a standalone `drift_report.html`. A detected change yields `distribution_changed`; otherwise the result is `no_drift_detected`. These refer to request schedules and prediction distributions. Calendar seasonality or deliberately selected queries can cause a signal. Without observed consumption, this operation cannot assess actual prediction error or factory-load changes. It does not retrain, promote a model, or open the validation or final test CSV. Streamlit presentation is the next monitoring step.
+
 ### Docker Compose runtime
 
 The portable runtime ZIP contains the project source, the prepared training and validation partitions, and the approved champion export. Extract it into a new directory and run the following from the extracted `steel-energy-mlops` directory with Docker and Compose installed.
@@ -368,7 +388,7 @@ python -m pre_commit run --all-files
 
 The same checks run automatically before local commits and in GitHub Actions: Flake8 for Python files, Pyright standard mode for `src/`, pytest with branch coverage, and separate minimum 95% coverage gates for `src/` and `tests/`. No application or test files are omitted from coverage.
 
-Changes to runtime source, Docker configuration, dependencies, or the integration-test fixtures also trigger a Compose smoke test in pre-commit. GitHub Actions runs it through the same hooks. The test generates 5,000 synthetic observations, trains and exports a Ridge model, builds the application image, and starts the API and MLflow with a new volume and dynamically assigned local ports. It verifies model readiness, non-root execution, prediction values, recorded prediction artifacts, and completion of a training request that retains the incumbent. It also restarts the API with a completed legacy job left running under an unrelated PID, verifies recovery, and admits another training request. The test cleans up its project containers, volume, network, and image.
+Changes to runtime source, Docker configuration, dependencies, or the integration-test fixtures also trigger a Compose smoke test in pre-commit. GitHub Actions runs it through the same hooks. The test generates 5,000 synthetic observations, trains and exports a Ridge model, builds the application image, and starts the API and MLflow with a new volume and dynamically assigned local ports. It verifies model readiness, non-root execution, prediction values, recorded prediction artifacts, Evidently HTML generation from 100 HTTP prediction rows, and completion of a training request that retains the incumbent. It also restarts the API with a completed legacy job left running under an unrelated PID, verifies recovery, and admits another training request. The test cleans up its project containers, volume, network, and image.
 
 Run this check directly with Docker and Compose available in the activated development environment.
 
@@ -390,7 +410,7 @@ The tests cover invalid data, chronological isolation, feature leakage, reproduc
 | Experiment tracking | MLflow Projects, artifacts, reloadable models, registry | Implemented locally |
 | Model management | Candidate comparison and promotion safeguards | Implemented locally |
 | Serving | Version-pinned prediction, isolated training jobs, status queries, request records | Training and prediction APIs implemented locally |
-| Monitoring | Evidently reports displayed in Streamlit | Planned |
+| Monitoring | Version-scoped Evidently reports from prediction artifacts | Reports implemented; Streamlit presentation pending |
 | Runtime | Docker image, single Compose startup, persistent model/data/job state | Implemented locally for API and MLflow; monitoring services pending |
 | Quality | Tests, coverage, Flake8, Pyright, pre-commit, GitHub Actions | Implemented for current application code |
 | Optional extension | Airflow orchestration and full-dataset analysis | Planned |
