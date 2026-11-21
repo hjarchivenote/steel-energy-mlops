@@ -6,7 +6,7 @@ This project uses measurements from a South Korean steel manufacturing facility 
 
 The repository supports an MLOps semester project at Óbuda University and will also serve as a portfolio project. The coursework uses a fixed 5,000-record target sample. A separate offline forecast experiment supplements it with earlier measurements from the original continuous source; it does not expand the target cohort or change its partitions.
 
-> **Status: training, prediction, and monitoring packaged with Docker Compose.** Data preparation, model comparison, MLflow tracking and registry, validation-based promotion, asynchronous training jobs, logged predictions, a persistent container runtime, and version-scoped Evidently reports displayed in Streamlit are implemented locally. Reported model errors below are validation results; final test evaluation remains reserved.
+> **Status: calendar training, prediction, and monitoring packaged with Docker Compose; the history forecast API is verified locally.** Data preparation, model comparison, MLflow tracking and registry, validation-based promotion, asynchronous training jobs, logged predictions, a persistent container runtime, and version-scoped Evidently reports displayed in Streamlit are implemented locally. Reported model errors below are validation results; final test evaluation remains reserved.
 
 ## Project objective
 
@@ -101,7 +101,7 @@ Machine-readable [selection](experiments/history_15min/selection.json) and [vali
 python -m experiments.history_15min.replay_validation
 ```
 
-The replay verifies original, training and validation hashes, logs to a separate local store, and never opens the final test CSV or registers a model. Tests use synthetic data to check availability, midnight fallback, future-value isolation, target integrity and rejection of unavailable labels. The running API, champion and monitoring still use the calendar contract. The final test remains unscored.
+The replay verifies original, training and validation hashes, logs to a separate local store, and never opens the final test CSV or registers a model. Tests use synthetic data to check availability, midnight fallback, future-value isolation, target integrity and rejection of unavailable labels. The default Docker stack and its monitoring use the calendar contract; the separate local history forecast API is described below. The final test remains unscored.
 
 ### Shared history input routing
 
@@ -115,7 +115,46 @@ Check that the shared code selects exactly the frozen experiment's history input
 python -m experiments.history_15min.check_routing
 ```
 
-The check verifies source/partition hashes and writes a machine-readable compatibility result under `artifacts/history-routing/`. The real-data check matches all 4,198 history-model inputs and all 52 midnight fallback routes across the training and validation partitions, with no additional missing/stale fallback. It fits no model, calculates no accuracy score, changes no registry entry and never opens the final test CSV. Synthetic tests cover boundary ages, early/late arrivals, duplicate queries and observations, midnight behavior, invalid unused readings and temporal isolation. This step prepares shared routing only. Reproducing the 6.7300 kWh validation result requires the frozen history estimator paired with its matched calendar forest, both fitted on 3,457 non-midnight labels. Saved forecast-model loading, the forecast HTTP endpoint and actual fallback prediction remain subsequent work.
+The check verifies source/partition hashes and writes a machine-readable compatibility result under `artifacts/history-routing/`. The real-data check matches all 4,198 history-model inputs and all 52 midnight fallback routes across the training and validation partitions, with no additional missing/stale fallback. It fits no model, calculates no accuracy score, changes no registry entry and never opens the final test CSV. Synthetic tests cover boundary ages, early/late arrivals, duplicate queries and observations, midnight behavior, invalid unused readings and temporal isolation. Reproducing the 6.7300 kWh validation result requires the frozen history estimator paired with its matched calendar forest, both fitted on 3,457 non-midnight labels.
+
+### Saved forecast pair and local HTTP service
+
+The history estimator and its matched calendar fallback are saved together in one MLflow publication run. The registered model `steel-energy-history-15min` has its own serving alias, separate from `steel-energy-calendar`. Publication checks the frozen configuration and validation evidence, round-trips both pipelines through skops serialization, and finishes all artifact writes before exposing the alias. Its `history-frozen-validation-v1` publication policy records prior offline evidence; it is separate from the calendar promotion policy. Replacing an existing history champion requires a new validation decision.
+
+With the original source and prepared sample restored, publish the fixed pair **once**, then start the local service:
+
+```bash
+python -m experiments.history_15min.publish
+steel-energy serve --workspace artifacts/mlflow --data data/processed --port 18001
+```
+
+Publication fits the frozen estimators only on the 3,457 non-midnight training labels. It does not search hyperparameters or open validation/test CSVs. Subsequent server starts load the saved pipelines without fitting. The serving option `--forecast-model-name` selects a server-controlled registry name; HTTP clients cannot supply model paths or select a version.
+
+| Endpoint | Behavior |
+|---|---|
+| `GET /forecast/ready` | Pin a version and verify the evidence checksum, routing contract, common publication run, and both saved pipelines |
+| `POST /forecast` | Accept 1-1,000 target timestamps and up to 10,000 historical readings, returning a method and reason for every target |
+| `POST /predict`, `POST /train` | Continue using the calendar model contract |
+
+Example request with **illustrative readings**, not a new accuracy measurement:
+
+```bash
+curl --fail-with-body http://127.0.0.1:18001/forecast \
+  -H 'Content-Type: application/json' \
+  -d '{"timestamps":["2019-01-07T10:00:00"],"observations":[{"timestamp":"2019-01-07T09:30:00","available_at":"2019-01-07T09:45:00","usage_kwh":20.0,"lagging_reactive_kvarh":2.0,"leading_reactive_kvarh":1.0,"lagging_power_factor_percent":80.0,"leading_power_factor_percent":90.0}]}'
+```
+
+Responses disclose `model_version`, `publication_run_id`, `evidence_run_id`, the training cutoff, the assumed-availability flag, and each target's `history_forecast` or `calendar_fallback` method. History predictions identify the actual source timestamp, declared arrival time, and age. Fallback results disclose `missing_history`, `stale_history`, or `midnight_target` and have null historical-source fields. Invalid readings, duplicate observation times, or forecasts preceding the model's training-label availability return `422`; missing/corrupt model pairs or unavailable storage return `503`. Both paths retain the frozen experiment's non-negative prediction clipping.
+
+Requests, actual input features and responses are logged to `steel-energy-forecast-prediction` with the HTTP request ID and pinned pair version. These runs are separate from the calendar monitoring experiment. Forecast-specific monitoring and portable Docker restoration of the pair remain subsequent work; the default Compose seed initializes the calendar model and `/forecast/ready` remains unavailable there until a forecast pair is provided.
+
+For local verification against the original frozen predictions:
+
+```bash
+python -m experiments.history_15min.verify_service --url http://127.0.0.1:18001
+```
+
+The live HTTP check reproduced **all 750 original validation predictions with maximum absolute difference 0.0 kWh**, using 741 history predictions and nine midnight fallbacks. A checked prediction was also reproduced exactly after restarting the server, without refitting. This verifies saved-model serving parity and does not constitute a new independent accuracy estimate. Publication run `6851b0eb09fd465c82c76c6a46866de9` serves history version 1; the calendar champion remains unchanged. The final test partition is still reserved.
 
 ## Model comparison and practical meaning
 

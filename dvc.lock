@@ -19,9 +19,9 @@ stages:
       size: 231
     - path: src/steel_energy_mlops
       hash: md5
-      md5: dc9bcf8f40ab9785fab250e66bacae93.dir
-      size: 145362
-      nfiles: 23
+      md5: d2e7aad1472e66b3fa7cfc010c291c59.dir
+      size: 167818
+      nfiles: 25
     outs:
     - path: data/processed
       hash: md5

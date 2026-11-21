@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 from uuid import uuid4
 
 import numpy as np
@@ -73,6 +74,12 @@ def test_compose_build_restore_predict_and_train(tmp_path, pytestconfig, monkeyp
         assert request(api + "/health")[1]["status"] == "ok"
         ready = request(api + "/ready")[1]
         assert ready["model_version"] == "1" and ready["promotion_policy"] == "calendar-reference-v3"
+        schema = request(api + "/openapi.json")[1]
+        assert {"/forecast", "/forecast/ready"} <= set(schema["paths"])
+        # The default calendar seed cannot silently act as a history-model pair.
+        with pytest.raises(HTTPError) as unavailable:
+            request(api + "/forecast/ready")
+        assert unavailable.value.code == 503
         assert compose("exec", "-T", "api", "id", "-u").stdout.strip() == "10001"
         with urlopen(ui + "/health", timeout=20) as response:
             assert response.status == 200

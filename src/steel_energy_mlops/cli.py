@@ -15,6 +15,7 @@ from steel_energy_mlops.api import create_app
 from steel_energy_mlops.data import DataValidationError
 from steel_energy_mlops.evaluation import evaluate_champion
 from steel_energy_mlops.input_audit import audit_inputs
+from steel_energy_mlops.forecast_models import DEFAULT_FORECAST_MODEL
 from steel_energy_mlops.modeling import LEARNED_FAMILIES
 from steel_energy_mlops.monitoring import monitor_predictions
 from steel_energy_mlops.monitoring_worker import watch_monitoring
@@ -82,6 +83,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
     serve = commands.add_parser("serve", help="Run the local prediction HTTP service and interactive API docs")
     serve.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
     serve.add_argument("--model-name", default=DEFAULT_MODEL)
+    serve.add_argument("--forecast-model-name", default=DEFAULT_FORECAST_MODEL)
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=_port, default=8000)
     serve.add_argument("--data", type=Path, default=Path("data/processed"))
@@ -116,7 +118,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
         elif args.command == "audit-inputs":
             result = audit_inputs(args.input, args.data, args.reporting_delay_minutes, args.workspace)
         elif args.command == "serve":
-            uvicorn.run(create_app(args.workspace, args.model_name, args.data),
+            uvicorn.run(create_app(args.workspace, args.model_name, args.data, args.forecast_model_name),
                         host=args.host, port=args.port, workers=1)
             return 0
         elif args.command == "export-model":
