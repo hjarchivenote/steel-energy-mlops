@@ -77,9 +77,29 @@ The first experiment uses the fixed coursework sample, seed 42, and the same sev
 
 The selected random forest uses 100 trees, maximum depth 6, and minimum leaf size 2. The bounded search evaluates 13 configurations across the two trivial baselines and three learned families. Selection is based on training CV MAE, not on choosing the best-looking validation or final test result.
 
-On the separate 750-row validation partition, random forest's MAE is approximately **48.6% lower than the stronger median baseline**, and 62.0% lower than the mean baseline. An MAE of 10.58 kWh means an average absolute error of that size per observation in this validation period. The higher RMSE highlights the importance of larger errors. These results do not demonstrate energy savings, performance at another facility, or accuracy on future operating regimes. The final 750 test records have not been scored by the training workflow.
+On the separate 750-row validation partition, random forest's MAE is approximately **48.6% lower than the better of the two constant baselines**, and 62.0% lower than the mean baseline. An MAE of 10.58 kWh means an average absolute error of that size per observation in this validation period. The higher RMSE highlights the importance of larger errors. The schedule-aware comparison below places this improvement in context. These results do not demonstrate energy savings, performance at another facility, or accuracy on future operating regimes. The final 750 test records have not been scored by the training or diagnostics workflows.
 
 Calendar information cannot describe unplanned shutdowns or production changes. The model therefore provides an expected consumption profile, with measured errors and an upgrade path, rather than a validated plant-control system. Production schedules or historical measurements can be considered later only after their availability at prediction time is established. Full-dataset analysis remains a separate extension after coursework requirements are met.
+
+### Schedule-aware reference and error diagnosis
+
+Run `steel-energy evaluate` after preparation and initial training. This compares one pinned champion version with fixed weekday/hour **mean and median** profiles, fitted only on training observations. Both profiles are also refitted inside the same three expanding training CV windows; their reference is selected by training CV MAE. Hourly grouping and the fallback order (weekday/hour, weekday-or-weekend/hour, hour, global statistic) are fixed rather than tuned against validation errors. All 750 real validation observations have a matching weekday/hour training cell.
+
+| Model | Training CV MAE (kWh) | Validation MAE (kWh) | Validation RMSE (kWh) | Validation 95th-percentile absolute error (kWh) |
+|---|---:|---:|---:|---:|
+| Random forest, registered version 1 | 11.45 | 10.58 | **19.65** | **44.99** |
+| Weekday/hour mean | 16.16 | 12.99 | 21.28 | 51.67 |
+| Weekday/hour median, CV-selected reference | 13.64 | **10.37** | 20.81 | 53.68 |
+
+The forest **does not beat the schedule median on validation MAE**: its error is 0.207 kWh higher per observation, although its RMSE and 95th-percentile absolute error are lower. The forest remains the winner under the original training-CV selection rule. These descriptive validation differences do not establish statistical significance or justify silently changing the selected model after seeing validation results. The 48.6% improvement over a constant median does not demonstrate incremental MAE value over a schedule-aware reference.
+
+The original promotion gate still compares against constant baselines and the incumbent; it does **not** yet enforce superiority over these schedule references. Adding that requirement and deciding how MAE versus large errors should affect promotion requires an explicit policy revision before further model development. This diagnostic command does not register models or change the serving alias.
+
+The observed high-consumption band, defined as actual usage above the **training** 75th percentile of 53.97 kWh, contains 144 validation observations. The forest's MAE in this band is **22.10 kWh**, and its average signed error is **-11.61 kWh** (prediction minus actual): it underestimates this band on average. Across all validation observations, its largest absolute error is 80.67 kWh. These cases warrant investigation; calendar inputs alone cannot identify their operational cause.
+
+Each diagnostic run records a machine-readable summary, all validation predictions, the 20 largest champion errors, and error slices by hour, weekday, weekday/weekend, month, date, and observed usage band in the local `steel-energy-diagnostics` MLflow experiment. Every slice includes its observation count, MAE, RMSE, signed bias, 95th-percentile and maximum absolute error. The lower and upper usage cutoffs are fitted on training targets only. Observed usage bands require known targets and are **offline diagnostics**, not prediction inputs or online alert rules. Date groups contain sampled observations, not complete daily energy totals; small groups are descriptive rather than reliable rankings.
+
+Diagnostics verify that the champion's feature contract, training/validation hashes, and training cutoff match the fixed evaluation data. They save the preparation manifest and application source alongside the results, never open the final test partition, and leave both registry versions and the serving alias unchanged.
 
 ## Training, registry, and prediction
 
@@ -126,7 +146,7 @@ Prediction operations record their exact timestamp request, generated features, 
 
 **MLflow Projects entry points**
 
-`MLproject` exposes `prepare`, `train`, and `predict`, sharing the same application functions as the CLI. For example, after the normal environment setup:
+`MLproject` exposes `prepare`, `train`, `predict`, and `evaluate`, sharing the same application functions as the CLI. For example, after the normal environment setup:
 
 ```bash
 export MLFLOW_TRACKING_URI=sqlite:///artifacts/mlflow/mlflow.db
@@ -156,7 +176,7 @@ steel-energy-mlops/
 ├── .github/workflows/       # Automated quality checks on pushes and pull requests
 ├── dvc.yaml / dvc.lock      # Reproducible preparation stage and artifact hashes
 ├── pyproject.toml           # Package, CLI, pytest, coverage, and Pyright configuration
-├── MLproject                # Shared prepare/train/predict entry points
+├── MLproject                # Shared prepare/train/predict/evaluate entry points
 ├── requirements.txt         # Pinned modeling dependencies
 ├── requirements-dev.txt     # Pinned development tools
 └── README.md
@@ -204,7 +224,7 @@ The tests cover invalid data, chronological isolation, feature leakage, reproduc
 |---|---|---|
 | Data | Source attribution, fixed sample, validation, DVC preparation and provenance | Implemented; shared storage pending |
 | Feature/evaluation preparation | Calendar-only predictors and chronological train/validation/test split | Implemented |
-| Modeling | Train-only CV and comparison with mean/median baselines | Implemented; final test evaluation reserved |
+| Modeling | Train-only CV, constant and schedule-aware comparisons, validation error slices | Implemented; final test evaluation reserved |
 | Experiment tracking | MLflow Projects, artifacts, reloadable models, registry | Implemented locally |
 | Model management | Candidate comparison and promotion safeguards | Implemented locally |
 | Serving | Version-pinned, logged CLI prediction; REST endpoints | CLI implemented; REST API planned |
@@ -217,7 +237,7 @@ The implemented application must maintain separate 95% coverage gates for source
 
 ## Development workflow
 
-After the initial repository bootstrap, development will use feature branches and pull requests merged into `main` with merge commits so that branch history is retained. Commits will represent actual implementation and validation work.
+Development uses local feature branches and meaningful commits. Changes are pushed and reviewed in batches when requested or when preparing a submission or shared milestone; routine local iterations do not require GitHub uploads or remote CI runs. Published pull requests are merged into `main` with merge commits so that branch history is retained.
 
 ## AI assistance
 

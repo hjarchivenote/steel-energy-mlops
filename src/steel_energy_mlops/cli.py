@@ -11,6 +11,7 @@ from pathlib import Path
 from mlflow.exceptions import MlflowException
 
 from steel_energy_mlops.data import DataValidationError
+from steel_energy_mlops.evaluation import evaluate_champion
 from steel_energy_mlops.modeling import LEARNED_FAMILIES
 from steel_energy_mlops.prediction import predict_consumption
 from steel_energy_mlops.preparation import prepare_dataset
@@ -19,7 +20,7 @@ from steel_energy_mlops.training import train_models
 
 
 def main(arguments: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Steel Energy MLOps preparation, training, and prediction")
+    parser = argparse.ArgumentParser(description="Steel Energy MLOps preparation, training, prediction and diagnostics")
     commands = parser.add_subparsers(dest="command", required=True)
     prepare = commands.add_parser("prepare-data", help="Validate data and create chronological feature partitions")
     prepare.add_argument("--input", type=Path, default=Path("data/coursework/Steel_industry_data_5000.csv"))
@@ -39,6 +40,10 @@ def main(arguments: Sequence[str] | None = None) -> int:
     predict.add_argument("--timestamp", type=datetime.fromisoformat, action="append", required=True)
     predict.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
     predict.add_argument("--model-name", default=DEFAULT_MODEL)
+    evaluate = commands.add_parser("evaluate", help="Compare the pinned champion with schedule references")
+    evaluate.add_argument("--data", type=Path, default=Path("data/processed"))
+    evaluate.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
+    evaluate.add_argument("--model-name", default=DEFAULT_MODEL)
     args = parser.parse_args(arguments)
     try:
         if args.command == "prepare-data":
@@ -48,10 +53,13 @@ def main(arguments: Sequence[str] | None = None) -> int:
         elif args.command == "train":
             result = train_models(args.data, args.workspace, args.model_name, tuple(args.families), args.forest_trees,
                                   args.minimum_improvement, args.seed)
+        elif args.command == "evaluate":
+            result = evaluate_champion(args.data, args.workspace, args.model_name)
         else:
             result = predict_consumption(tuple(args.timestamp), args.workspace, args.model_name)
     except (DataValidationError, ValueError, OSError, UnicodeError, csv.Error, MlflowException) as exc:
-        operations = {"prepare-data": "Data preparation", "train": "Model training", "predict": "Prediction"}
+        operations = {"prepare-data": "Data preparation", "train": "Model training", "predict": "Prediction",
+                      "evaluate": "Validation diagnostics"}
         operation = operations[args.command]
         print(f"{operation} failed: {exc}", file=sys.stderr)
         return 2
