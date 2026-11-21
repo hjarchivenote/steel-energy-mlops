@@ -1,10 +1,7 @@
 """Replay the frozen history experiment; never select models, score final test, or deploy."""
 
 import argparse
-import csv
-import hashlib
 import json
-from datetime import datetime, timedelta
 from pathlib import Path
 
 import mlflow
@@ -12,46 +9,16 @@ import numpy as np
 from sklearn.ensemble import HistGradientBoostingRegressor, RandomForestRegressor
 from threadpoolctl import threadpool_limits
 
-from steel_energy_mlops.data import SOURCE_COLUMNS, DataValidationError, _parse_record
-from steel_energy_mlops.forecast_inputs import AvailableObservation, build_forecast_inputs
+from steel_energy_mlops.data import DataValidationError
 from steel_energy_mlops.tracking import open_store
 from steel_energy_mlops.training_data import load_training_data
 
+if __package__:
+    from .context import DELAY, context_inputs, is_midnight
+else:
+    from context import DELAY, context_inputs, is_midnight
+
 HERE = Path(__file__).resolve().parent
-DELAY = timedelta(minutes=15)
-
-
-def is_midnight(stamp):
-    return stamp.hour == 0 and stamp.minute == 0
-
-
-def context_inputs(source, partitions, expected_sha256):
-    """Read numerical context only through the last requested target, preserving original dates."""
-    if hashlib.sha256(source.read_bytes()).hexdigest() != expected_sha256:
-        raise DataValidationError("Original context source checksum differs from the frozen plan.")
-    targets = tuple(stamp for partition in partitions for stamp in partition.timestamps)
-    records = {}
-    with source.open(encoding="utf-8-sig", newline="") as stream:
-        reader = csv.reader(stream, strict=True)
-        if next(reader, None) != list(SOURCE_COLUMNS):
-            raise DataValidationError("Original context must retain the 11-column source schema.")
-        for line, values in enumerate(reader, 2):
-            if len(values) != len(SOURCE_COLUMNS):
-                raise DataValidationError("Original context must have exactly 11 cells per row.")
-            stamp = datetime.strptime(values[0], "%d/%m/%Y %H:%M")
-            if stamp > targets[-1]:
-                continue
-            if stamp in records:
-                raise DataValidationError("Original context contains a duplicate timestamp.")
-            records[stamp] = _parse_record(dict(zip(SOURCE_COLUMNS, values, strict=True)), line)
-    if any(stamp not in records for stamp in targets):
-        raise DataValidationError("Original context is missing a fixed target observation.")
-    expected = np.concatenate([partition.target for partition in partitions])
-    if not np.allclose([records[stamp].usage_kwh for stamp in targets], expected, rtol=0, atol=1e-9):
-        raise DataValidationError("Original context target values differ from the fixed sample.")
-    history = tuple(AvailableObservation(row, row.timestamp + DELAY) for row in records.values()
-                    if not is_midnight(row.timestamp))
-    return build_forecast_inputs(targets, history)
 
 
 def metrics(target, output, high, mask):
@@ -90,6 +57,7 @@ def replay(source, directory, workspace, plan):
         # Log the selection and acceptance criteria before reading validation observations.
         mlflow.log_dict(plan, "frozen_validation_plan.json")
         mlflow.log_artifact(str(Path(__file__)), "source")
+        mlflow.log_artifact(str(HERE / "context.py"), "source")
         data = load_training_data(directory)
         train, validation = data.train, data.validation
         if train.sha256 != plan["train_sha256"]:

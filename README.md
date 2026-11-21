@@ -98,10 +98,24 @@ All predeclared checks pass. MAE is 14.5% lower than persistence and 33.2% lower
 Machine-readable [selection](experiments/history_15min/selection.json) and [validation](experiments/history_15min/validation.json) snapshots preserve the frozen plans, hashes, all screened candidates and acceptance checks. The original source and availability/prediction traces are stored in MLflow experiment `steel-energy-dense-history-screen`: selection run `5fc6a173bd9c4d3b8bc6c2e8b603e030`, validation run `3ff1b50d2cc74358b0ef5889e89039b4`. With the original source and prepared data restored, replay the frozen validation without tuning:
 
 ```bash
-python experiments/history_15min/replay_validation.py
+python -m experiments.history_15min.replay_validation
 ```
 
-The replay verifies original, training and validation hashes, logs to a separate local store, and never opens the final test CSV or registers a model. Tests use synthetic data to check availability, midnight fallback, future-value isolation, target integrity and rejection of unavailable labels. The running API, champion and monitoring still use the calendar contract. The next implementation step is an explicit forecast request contract with historical observations, arrival-time validation and fallback behavior before any deployment decision. The final test remains unscored.
+The replay verifies original, training and validation hashes, logs to a separate local store, and never opens the final test CSV or registers a model. Tests use synthetic data to check availability, midnight fallback, future-value isolation, target integrity and rejection of unavailable labels. The running API, champion and monitoring still use the calendar contract. The final test remains unscored.
+
+### Shared history input routing
+
+`build_forecast_routes` in `steel_energy_mlops.forecast_routing` centralizes the candidate's input conditions for future serving. Policy `history-15min-routing-v1` enforces a minimum 15-minute delay after measurement, even if a caller reports an earlier arrival. A genuinely late arrival remains unavailable until its actual arrival time; traces retain that actual time. Midnight observations are excluded without moving their dates, and every submitted reading is validated, including unused future or midnight records.
+
+Non-midnight training inputs have ages of 15 minutes (3,428 rows) or 30 minutes (29 rows) at forecast origin. The routing support limit is therefore fixed at 30 minutes using **training inputs only**. This does not establish accuracy under another collection delay. Missing history, history older than that limit, and midnight targets receive explicit `calendar_fallback` routes with reasons `missing_history`, `stale_history`, and `midnight_target`. Those routes expose no history-model input, so callers must handle the calendar path explicitly. No input is filled from the future.
+
+Check that the shared code selects exactly the frozen experiment's history inputs and midnight fallbacks:
+
+```bash
+python -m experiments.history_15min.check_routing
+```
+
+The check verifies source/partition hashes and writes a machine-readable compatibility result under `artifacts/history-routing/`. The real-data check matches all 4,198 history-model inputs and all 52 midnight fallback routes across the training and validation partitions, with no additional missing/stale fallback. It fits no model, calculates no accuracy score, changes no registry entry and never opens the final test CSV. Synthetic tests cover boundary ages, early/late arrivals, duplicate queries and observations, midnight behavior, invalid unused readings and temporal isolation. This step prepares shared routing only. Reproducing the 6.7300 kWh validation result requires the frozen history estimator paired with its matched calendar forest, both fitted on 3,457 non-midnight labels. Saved forecast-model loading, the forecast HTTP endpoint and actual fallback prediction remain subsequent work.
 
 ## Model comparison and practical meaning
 
