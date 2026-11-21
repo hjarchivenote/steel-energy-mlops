@@ -3,10 +3,12 @@ import os
 import time
 from pathlib import Path
 from threading import Event
+from types import SimpleNamespace
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from filelock import FileLock
+import psutil
 import pytest
 
 from steel_energy_mlops import api, training_jobs
@@ -92,7 +94,9 @@ def test_real_training_api_promotes_then_rejects_identical_candidate_and_survive
         artifact = tracker.download_artifacts(run.info.run_id, "http_training_request.json")
         assert json.loads(Path(artifact).read_text())["parameters"] == PARAMETERS
 
-        second = client.post("/train", json=PARAMETERS).json()
+        response = client.post("/train", json=PARAMETERS)
+        assert response.status_code == 202, response.json()
+        second = response.json()
         # Training runs outside the web process: an existing model remains available during training.
         assert client.get("/health").status_code == 200
         prediction = client.post("/predict", json={"timestamps": ["2019-01-07T10:00:00"]})
@@ -251,10 +255,38 @@ def test_recovery_recognizes_completed_output_even_with_a_different_configured_m
     assert manager.get(record["job_id"])["status"] == "succeeded"
 
 
+def test_completed_result_with_an_unrelated_live_pid_recovers_and_allows_next_job(fake_training) -> None:
+    directory, workspace, process, _ = fake_training
+    manager = TrainingJobs(workspace, directory, "fake-model")
+    record = seed_record(manager, pid=os.getpid())
+    result = result_for("fake-model")
+    (manager.root / record["job_id"] / "result.json").write_text(json.dumps(result))
+    assert manager.get(record["job_id"])["status"] == "succeeded"
+    assert manager.get(record["job_id"])["result"] == result
+    try:
+        assert manager.start(PARAMETERS, uuid4().hex)["job_id"] != record["job_id"]
+    finally:
+        process.release.set()
+        manager.close()
+
+
+@pytest.mark.parametrize("has_identity", [False, True])
+def test_unrelated_live_pid_without_valid_result_becomes_interrupted(tmp_path, has_identity) -> None:
+    manager = TrainingJobs(tmp_path, tmp_path / "data", "fake-model")
+    record = seed_record(manager, pid=os.getpid())
+    if has_identity:
+        record["process_started_at"] = psutil.Process().create_time() - 60
+        manager._save(record)
+    result = manager.get(record["job_id"])
+    assert result["status"] == "interrupted" and result["error"]["code"] == "training_interrupted"
+
+
 def test_orphaned_live_worker_prevents_new_admission(tmp_path) -> None:
     directory = make_training_data(tmp_path)
     manager = TrainingJobs(tmp_path / "tracking", directory, "fake-model")
-    seed_record(manager, pid=os.getpid())
+    record = seed_record(manager, pid=os.getpid())
+    record["process_started_at"] = psutil.Process().create_time()
+    manager._save(record)
     with pytest.raises(TrainingBusyError, match="previous training"):
         manager.start(PARAMETERS, uuid4().hex)
 
@@ -271,13 +303,79 @@ def test_corrupt_job_records_are_reported_as_storage_errors(tmp_path, content) -
         manager.get("../private")
 
 
-@pytest.mark.parametrize("failure,expected", [(ProcessLookupError(), False), (PermissionError(), True)])
-def test_pid_probe_distinguishes_missing_and_inaccessible_processes(monkeypatch, failure, expected) -> None:
+@pytest.mark.parametrize("failure,expected", [(psutil.NoSuchProcess(42), False), (psutil.AccessDenied(42), True)])
+def test_worker_probe_handles_missing_and_inaccessible_processes(tmp_path, monkeypatch, failure, expected) -> None:
     def fail(*args):
         raise failure
 
-    monkeypatch.setattr(training_jobs.os, "kill", fail)
-    assert training_jobs._alive(42) is expected
+    manager = TrainingJobs(tmp_path, tmp_path / "data", "fake-model")
+    record = seed_record(manager, pid=42)
+    monkeypatch.setattr(training_jobs.psutil, "Process", fail)
+    assert manager._worker_alive(record) is expected
+    assert training_jobs._started_at(42) is None
+
+
+@pytest.mark.parametrize("kind", ["matching", "other-job", "other-program", "exited"])
+def test_legacy_records_identify_their_training_command(tmp_path, monkeypatch, kind) -> None:
+    manager = TrainingJobs(tmp_path, tmp_path / "data", "fake-model")
+    record = seed_record(manager, pid=42)
+    snapshot = str(manager.root / record["job_id"] / "data")
+    command = ["python", "-m", "steel_energy_mlops", "train", "--data", snapshot]
+    if kind == "other-job":
+        command[-1] += "-different"
+    elif kind == "other-program":
+        command[2] = "another_module"
+    probe = SimpleNamespace(cmdline=lambda: command, is_running=lambda: kind != "exited")
+    monkeypatch.setattr(training_jobs.psutil, "Process", lambda pid: probe)
+    recovered = manager.get(record["job_id"])
+    assert recovered["status"] == ("running" if kind == "matching" else "interrupted")
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_saved_result_keeps_the_identified_worker_running(fake_training, complete) -> None:
+    directory, workspace, process, _ = fake_training
+    manager = TrainingJobs(workspace, directory, "fake-model")
+    job = manager.start(PARAMETERS, uuid4().hex)
+    try:
+        assert job["process_started_at"] == psutil.Process().create_time()
+        content = json.dumps(result_for("fake-model")) if complete else '{"model_name":'
+        (manager.root / job["job_id"] / "result.json").write_text(content)
+        other_manager = TrainingJobs(workspace, directory, "fake-model")
+        assert other_manager.get(job["job_id"])["status"] == "running"
+    finally:
+        process.release.set()
+        manager.close()
+
+
+@pytest.mark.parametrize("field,value", [("pid", 0), ("pid", -1), ("pid", True),
+                                         ("process_started_at", -1), ("process_started_at", "yesterday"),
+                                         ("process_started_at", float("nan")), ("process_started_at", True)])
+def test_invalid_process_identity_is_reported_as_invalid_storage(tmp_path, field, value) -> None:
+    manager = TrainingJobs(tmp_path, tmp_path / "data", "fake-model")
+    record = seed_record(manager)
+    record[field] = value
+    (manager.root / record["job_id"] / "job.json").write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="Invalid training"):
+        manager.get(record["job_id"])
+
+
+def test_worker_exit_releases_admission_before_publishing_completion(fake_training, monkeypatch) -> None:
+    directory, workspace, process, _ = fake_training
+    manager = TrainingJobs(workspace, directory, "fake-model")
+    original = manager._finish
+    published = []
+
+    def finish(record, code):
+        with FileLock(workspace / "api-training.lock", timeout=0):
+            published.append(record["job_id"])
+        return original(record, code)
+
+    monkeypatch.setattr(manager, "_finish", finish)
+    job = manager.start(PARAMETERS, uuid4().hex)
+    process.release.set()
+    manager.close()
+    assert published == [job["job_id"]]
+    assert manager.get(job["job_id"])["status"] == "failed"
 
 
 def test_monitor_failure_is_recoverable_and_always_releases_admission(fake_training, monkeypatch) -> None:
@@ -293,7 +391,7 @@ def test_monitor_failure_is_recoverable_and_always_releases_admission(fake_train
     process.release.set()
     manager.close()
     monkeypatch.setattr(manager, "_finish", original)
-    monkeypatch.setattr(training_jobs, "_alive", lambda pid: False)
+    monkeypatch.setattr(manager, "_worker_alive", lambda record: False)
     assert manager.get(job["job_id"])["status"] == "interrupted"
     with FileLock(workspace / "api-training.lock", timeout=0):
         pass

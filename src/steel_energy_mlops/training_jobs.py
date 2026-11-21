@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -14,6 +15,7 @@ from typing import Any
 from uuid import uuid4
 
 from filelock import FileLock, Timeout
+import psutil
 
 from steel_energy_mlops.training_data import load_training_data
 
@@ -32,16 +34,11 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _alive(pid: int | None) -> bool:
-    if pid is None:
-        return False
+def _started_at(pid: int) -> float | None:
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+        return psutil.Process(pid).create_time()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return None
 
 
 class TrainingJobs:
@@ -66,8 +63,12 @@ class TrainingJobs:
                     "training_request_id", "train_sha256", "validation_sha256", "result", "error"}
         if (not isinstance(record, dict) or record.get("job_id") != job_id or not required <= record.keys()
                 or record["status"] not in ("running", "succeeded", "failed", "interrupted")
-                or (record["pid"] is not None and type(record["pid"]) is not int)):
+                or (record["pid"] is not None and (type(record["pid"]) is not int or record["pid"] <= 0))):
             raise ValueError("Invalid training job record.")
+        started_at = record.get("process_started_at")
+        if started_at is not None and (type(started_at) not in (int, float)
+                                       or not math.isfinite(started_at) or started_at <= 0):
+            raise ValueError("Invalid training process identity.")
         return record
 
     def _save(self, record: dict[str, Any]) -> None:
@@ -77,15 +78,38 @@ class TrainingJobs:
         temporary.write_text(json.dumps(record, allow_nan=False, sort_keys=True), encoding="utf-8")
         temporary.replace(path)
 
+    def _result(self, record: dict[str, Any]) -> dict[str, Any]:
+        result = json.loads((self.root / record["job_id"] / "result.json").read_text(encoding="utf-8"))
+        if (not isinstance(result, dict) or result.get("model_name") != record["model_name"]
+                or not isinstance(result.get("run_id"), str) or not isinstance(result.get("promoted"), bool)
+                or result.get("test_evaluated") is not False):
+            raise ValueError("Invalid training result.")
+        return result
+
+    def _worker_alive(self, record: dict[str, Any]) -> bool:
+        if record["pid"] is None:
+            return False
+        try:
+            process = psutil.Process(record["pid"])
+            started_at = record.get("process_started_at")
+            if started_at is not None:
+                return process.create_time() == started_at and process.is_running()
+            # Older records lack creation times. Bind them to the exact job's CLI data snapshot.
+            command = process.cmdline()
+            snapshot = str(self.root / record["job_id"] / "data")
+            return (command[1:4] == ["-m", "steel_energy_mlops", "train"]
+                    and any(command[index:index + 2] == ["--data", snapshot] for index in range(len(command) - 1))
+                    and process.is_running())
+        except psutil.NoSuchProcess:
+            return False
+        except psutil.AccessDenied:
+            return True
+
     def _finish(self, record: dict[str, Any], returncode: int | None) -> dict[str, Any]:
         try:
             if returncode not in (0, None):
                 raise ValueError("Training process failed.")
-            result = json.loads((self.root / record["job_id"] / "result.json").read_text(encoding="utf-8"))
-            if (not isinstance(result, dict) or result.get("model_name") != record["model_name"]
-                    or not isinstance(result.get("run_id"), str) or not isinstance(result.get("promoted"), bool)
-                    or result.get("test_evaluated") is not False):
-                raise ValueError("Invalid training result.")
+            result = self._result(record)
             record.update(status="succeeded", result=result, error=None)
         except (OSError, ValueError):
             interrupted = returncode is None
@@ -98,8 +122,16 @@ class TrainingJobs:
         return record
 
     def _recover(self, record: dict[str, Any]) -> dict[str, Any]:
-        if record["status"] == "running" and not _alive(record["pid"]):
-            return self._finish(record, None)
+        if record["status"] == "running":
+            try:
+                result = self._result(record)
+            except (OSError, ValueError):
+                if not self._worker_alive(record):
+                    return self._finish(record, None)
+            else:
+                if not self._worker_alive(record):
+                    record.update(status="succeeded", result=result, error=None)
+                    self._save(record)
         return record
 
     def get(self, job_id: str) -> dict[str, Any]:
@@ -150,6 +182,7 @@ class TrainingJobs:
                     process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=output, stderr=log,
                                                env=environment, start_new_session=True)
                 record["pid"] = process.pid
+                record["process_started_at"] = _started_at(process.pid)
                 self._save(record)
                 self._thread = Thread(target=self._monitor, args=(process, job_id, lease), daemon=True)
                 self._thread.start()
@@ -167,6 +200,8 @@ class TrainingJobs:
     def _monitor(self, process: subprocess.Popen, job_id: str, lease: Any) -> None:
         try:
             code = process.wait()
+            # The worker has exited; release admission before publishing its terminal status.
+            lease.release(force=True)
             with self._mutex:
                 self._finish(self._read(job_id), code)
         except Exception:

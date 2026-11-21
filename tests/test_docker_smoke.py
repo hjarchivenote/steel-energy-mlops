@@ -53,6 +53,15 @@ def test_compose_build_restore_predict_and_train(tmp_path, pytestconfig, monkeyp
         with urlopen(Request(url, data=data, headers={"Content-Type": "application/json"}), timeout=20) as response:
             return response.status, json.load(response)
 
+    def wait_for_job(admission):
+        job = request(api + admission["status_url"])[1]
+        deadline = time.monotonic() + 90
+        while job["status"] == "running" and time.monotonic() < deadline:
+            time.sleep(1)
+            job = request(api + admission["status_url"])[1]
+        assert job["status"] == "succeeded", job
+        return job
+
     try:
         compose("up", "--build", "-d", "--wait", "--wait-timeout", "180")
         api = "http://" + compose("port", "api", "8000").stdout.strip()
@@ -70,13 +79,28 @@ def test_compose_build_restore_predict_and_train(tmp_path, pytestconfig, monkeyp
         assert request(artifact)[1] == prediction
         status, admission = request(api + "/train", {"families": ["ridge"]})
         assert status == 202
-        job = request(api + admission["status_url"])[1]
-        deadline = time.monotonic() + 90
-        while job["status"] == "running" and time.monotonic() < deadline:
-            time.sleep(1)
-            job = request(api + admission["status_url"])[1]
-        assert job["status"] == "succeeded", job
+        job = wait_for_job(admission)
         assert job["result"]["test_evaluated"] is False and job["result"]["promoted"] is False
+        # Reproduce a legacy record left running with a live, unrelated PID after API loss.
+        orphan_id = uuid4().hex
+        seed_orphan = (
+            "import json; from pathlib import Path; "
+            f"p=Path('/runtime/mlflow/training_jobs/{job['job_id']}/job.json'); "
+            f"d=p.parent.parent/'{orphan_id}'; d.mkdir(); "
+            "r=json.loads(p.read_text()); "
+            f"r.update(job_id='{orphan_id}',status='running',pid=1,result=None,error=None); "
+            "r.pop('process_started_at',None); (d/'job.json').write_text(json.dumps(r)); "
+            "(d/'result.json').write_bytes((p.parent/'result.json').read_bytes())"
+        )
+        compose("exec", "-T", "api", "python", "-c", seed_orphan)
+        compose("restart", "api")
+        compose("up", "-d", "--wait", "--wait-timeout", "180")
+        api = "http://" + compose("port", "api", "8000").stdout.strip()
+        recovered = request(api + f"/train/{orphan_id}")[1]
+        assert recovered["status"] == "succeeded" and recovered["result"] == job["result"]
+        status, retry = request(api + "/train", {"families": ["ridge"]})
+        assert status == 202 and retry["job_id"] != job["job_id"]
+        assert wait_for_job(retry)["result"]["promoted"] is False
         assert request(api + "/ready")[1]["model_version"] == ready["model_version"]
     finally:
         logs = compose("logs", "--no-color", "--tail", "100", check=False)
