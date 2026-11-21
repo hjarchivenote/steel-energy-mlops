@@ -62,6 +62,27 @@ services:
       retries: 6
     restart: unless-stopped
 
+  dashboard:
+    <<: *app
+    depends_on:
+      initialize:
+        condition: service_completed_successfully
+    entrypoint: ["streamlit"]
+    command: ["run", "/app/dashboard/app.py", "--server.address=0.0.0.0", "--server.port=8501", "--server.headless=true", "--browser.gatherUsageStats=false", "--server.fileWatcherType=none"]
+    environment:
+      STEEL_ENERGY_WORKSPACE: /runtime/mlflow
+    volumes:
+      - runtime:/runtime:ro
+    ports:
+      - "127.0.0.1:${STEEL_ENERGY_DASHBOARD_PORT:-18501}:8501"
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8501/_stcore/health', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      start_period: 30s
+      retries: 6
+    restart: unless-stopped
+
   mlflow:
     <<: *app
     depends_on:

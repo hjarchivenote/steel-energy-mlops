@@ -38,7 +38,7 @@ def test_compose_build_restore_predict_and_train(tmp_path, pytestconfig, monkeyp
     environment = {key: value for key, value in os.environ.items()
                    if key not in ("COMPOSE_FILE", "COMPOSE_PROJECT_NAME", "COMPOSE_PROFILES")}
     environment.update(STEEL_ENERGY_PREPARED_DATA=str(directory), STEEL_ENERGY_MODEL_SEEDS=str(seeds),
-                       STEEL_ENERGY_API_PORT="0", STEEL_ENERGY_MLFLOW_PORT="0")
+                       STEEL_ENERGY_API_PORT="0", STEEL_ENERGY_MLFLOW_PORT="0", STEEL_ENERGY_DASHBOARD_PORT="0")
 
     def compose(*arguments, check=True):
         completed = subprocess.run(["docker", "compose", "-p", project, *arguments],
@@ -66,6 +66,9 @@ def test_compose_build_restore_predict_and_train(tmp_path, pytestconfig, monkeyp
         compose("up", "--build", "-d", "--wait", "--wait-timeout", "180")
         api = "http://" + compose("port", "api", "8000").stdout.strip()
         ui = "http://" + compose("port", "mlflow", "5000").stdout.strip()
+        dashboard = "http://" + compose("port", "dashboard", "8501").stdout.strip()
+        with urlopen(dashboard + "/_stcore/health", timeout=20) as response:
+            assert response.status == 200
         assert request(api + "/health")[1]["status"] == "ok"
         ready = request(api + "/ready")[1]
         assert ready["model_version"] == "1" and ready["promotion_policy"] == "calendar-reference-v2"
@@ -84,6 +87,25 @@ def test_compose_build_restore_predict_and_train(tmp_path, pytestconfig, monkeyp
         report_url = ui + "/get-artifact?" + urlencode({"run_id": monitored["run_id"], "path": "drift_report.html"})
         with urlopen(report_url, timeout=20) as response:
             assert response.status == 200 and b"<html" in response.read().lower()
+        dashboard_check = """
+import errno
+import os
+from pathlib import Path
+from streamlit.testing.v1 import AppTest
+assert os.getuid() == 10001
+app = AppTest.from_file('/app/dashboard/app.py').run(timeout=60)
+assert not app.exception, app.exception
+assert not app.error, app.error
+assert app.metric[0].value == '100'
+assert len(app.get('iframe')) == 1
+try:
+    Path('/runtime/dashboard-write-probe').touch()
+except OSError as error:
+    assert error.errno == errno.EROFS
+else:
+    raise AssertionError('Dashboard runtime volume must be read-only.')
+"""
+        compose("exec", "-T", "dashboard", "python", "-c", dashboard_check)
         status, admission = request(api + "/train", {"families": ["ridge"]})
         assert status == 202
         job = wait_for_job(admission)

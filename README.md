@@ -6,7 +6,7 @@ This project uses measurements from a South Korean steel manufacturing facility 
 
 The repository supports an MLOps semester project at Óbuda University and will also serve as a portfolio project. The coursework uses a fixed 5,000-record sample; analysis of the complete dataset is a later extension within this same repository.
 
-> **Status: training and prediction APIs packaged with Docker Compose.** Data preparation, model comparison, MLflow tracking and registry, validation-based promotion, asynchronous training jobs, logged predictions, a persistent container runtime, and version-scoped Evidently reports are implemented. The Streamlit monitoring dashboard remains to be implemented. Reported model errors below are validation results; final test evaluation remains reserved.
+> **Status: training, prediction, and monitoring packaged with Docker Compose.** Data preparation, model comparison, MLflow tracking and registry, validation-based promotion, asynchronous training jobs, logged predictions, a persistent container runtime, and version-scoped Evidently reports displayed in Streamlit are implemented locally. Reported model errors below are validation results; final test evaluation remains reserved.
 
 ## Project objective
 
@@ -258,7 +258,21 @@ The operation pins one champion version, verifies its training checksum, and com
 
 Both datasets need at least 100 rows after deduplicating current timestamps. Otherwise, the saved status is `insufficient_data`, without an Evidently drift verdict or HTML report. This is a conservative operational guard, not proof of statistical power. With sufficient data, Evidently uses normalized Wasserstein distance for numeric columns and Jensen–Shannon distance for `is_weekend`, with an explicit distance threshold of 0.1. Monitoring copies are rounded to 12 decimal places to prevent floating-point noise from breaking histograms for nearly constant calendar columns; prediction serving and original artifacts are unchanged.
 
-The `steel-energy-monitoring` experiment stores `monitoring_summary.json` and the deduplicated `current_predictions.csv`. Evaluated snapshots also contain `evidently.json` and a standalone `drift_report.html`. A detected change yields `distribution_changed`; otherwise the result is `no_drift_detected`. These refer to request schedules and prediction distributions. Calendar seasonality or deliberately selected queries can cause a signal. Without observed consumption, this operation cannot assess actual prediction error or factory-load changes. It does not retrain, promote a model, or open the validation or final test CSV. Streamlit presentation is the next monitoring step.
+The `steel-energy-monitoring` experiment stores `monitoring_summary.json` and the deduplicated `current_predictions.csv`. Evaluated snapshots also contain `evidently.json` and a standalone `drift_report.html`. A detected change yields `distribution_changed`; otherwise the result is `no_drift_detected`. These refer to request schedules and prediction distributions. Calendar seasonality or deliberately selected queries can cause a signal. Without observed consumption, this operation cannot assess actual prediction error or factory-load changes. It does not retrain, promote a model, or open the validation or final test CSV. Attempts for a compatible champion are recorded before reading input data, so failures while loading prediction artifacts are visible as failed monitoring runs.
+
+### Monitoring dashboard
+
+The Compose stack includes a Streamlit dashboard at [http://127.0.0.1:18501](http://127.0.0.1:18501). It reads the latest monitoring attempt for the deployed model version and training checksum. The runtime volume is mounted read-only in this container. Viewing or refreshing the page does not generate a report, train a model, or change the registry.
+
+The dashboard shows unique prediction times, the required sample size, reference rows, removed duplicates, and the saved snapshot time. With sufficient data, it displays per-column distances and the saved Evidently HTML report. Insufficient data, missing results, running or failed attempts, and storage errors have distinct messages. A latest failed or unfinished attempt hides earlier results; incompatible or inconsistent saved summaries are rejected. Snapshots older than 24 hours and snapshots reaching the request limit carry warnings. A lack of detected drift is not displayed as proof of prediction quality.
+
+After collecting predictions, run the `monitor` command above and select **Refresh saved results** to load that snapshot. Report scheduling is not implemented. `STEEL_ENERGY_DASHBOARD_PORT` changes the local Compose port. For development outside Docker:
+
+```bash
+STEEL_ENERGY_WORKSPACE=artifacts/mlflow streamlit run dashboard/app.py --browser.gatherUsageStats=false
+```
+
+`dashboard/app.py` is a thin entry point; result loading, validation, and presentation live in `src/steel_energy_mlops/dashboard.py`. `STEEL_ENERGY_MODEL_NAME` optionally selects the registered model name for this local view.
 
 ### Docker Compose runtime
 
@@ -288,6 +302,7 @@ docker compose up --build -d --wait
 
 - [Container API and interactive documentation](http://127.0.0.1:18000/docs)
 - [Container MLflow UI](http://127.0.0.1:15001)
+- [Container monitoring dashboard](http://127.0.0.1:18501)
 
 The container API exposes the same `/health`, `/ready`, `/predict`, `/train`, and `/train/{job_id}` contracts described above. Ports bind to the local computer. `STEEL_ENERGY_API_PORT` and `STEEL_ENERGY_MLFLOW_PORT` can override their defaults. A second installation on the same computer can use `docker compose -p steel-energy-demo up --build -d --wait` with distinct ports. The Compose project name scopes the image tag, containers, network, and volume.
 
@@ -312,7 +327,7 @@ docker compose down
 
 `down` removes this project's containers and network while retaining its named volume. Starting again restores access to persisted models and completed jobs. Adding `--volumes` would delete that state. API shutdown allows up to 120 seconds for its worker to finish; an interrupted job can be reconciled from its durable record after startup.
 
-The image uses a digest-pinned Python 3.12 base and the pinned application dependencies. Only the one-shot volume ownership service runs as root. This is a local, single-host SQLite deployment with one API worker and one admitted training job; distributed coordination, a shared artifact store, and the monitoring services remain future work.
+The image uses a digest-pinned Python 3.12 base and the pinned application dependencies. Only the one-shot volume ownership service runs as root. This is a local, single-host SQLite deployment with one API worker, one admitted training job, and a read-only monitoring dashboard; distributed coordination, a shared artifact store, and report scheduling remain future work.
 
 **MLflow Projects entry points**
 
@@ -340,7 +355,7 @@ steel-energy-mlops/
 │   └── processed/           # Generated features, partitions, and provenance manifest
 ├── src/steel_energy_mlops/   # Validation, features, splitting, preparation, and CLI
 ├── tests/                   # Synthetic unit and integration tests; no data download needed
-├── dashboard/               # Reserved for the Streamlit entry point
+├── dashboard/               # Thin Streamlit entry point
 ├── dags/                    # Reserved for optional Airflow workflows
 ├── docs/screenshots/        # Reserved for screenshots of the running system
 ├── .github/workflows/       # Automated quality checks on pushes and pull requests
@@ -354,7 +369,7 @@ steel-energy-mlops/
 └── README.md
 ```
 
-The dashboard, Airflow, and screenshot directories remain placeholders. Submission PDFs and ZIP archives are kept locally in the ignored `submission/` directory.
+The Airflow and screenshot directories remain placeholders. Submission PDFs and ZIP archives are kept locally in the ignored `submission/` directory.
 
 ## Data version control
 
@@ -410,12 +425,12 @@ The tests cover invalid data, chronological isolation, feature leakage, reproduc
 | Experiment tracking | MLflow Projects, artifacts, reloadable models, registry | Implemented locally |
 | Model management | Candidate comparison and promotion safeguards | Implemented locally |
 | Serving | Version-pinned prediction, isolated training jobs, status queries, request records | Training and prediction APIs implemented locally |
-| Monitoring | Version-scoped Evidently reports from prediction artifacts | Reports implemented; Streamlit presentation pending |
-| Runtime | Docker image, single Compose startup, persistent model/data/job state | Implemented locally for API and MLflow; monitoring services pending |
+| Monitoring | Version-scoped Evidently reports from prediction artifacts | Reports and Streamlit presentation implemented locally |
+| Runtime | Docker image, single Compose startup, persistent model/data/job state | Implemented locally for API, MLflow, and Streamlit |
 | Quality | Tests, coverage, Flake8, Pyright, pre-commit, GitHub Actions | Implemented for current application code |
 | Optional extension | Airflow orchestration and full-dataset analysis | Planned |
 
-The implemented application must maintain separate 95% coverage gates for source and test code, Pyright standard mode, and Flake8 compliance. Container startup, HTTP training/prediction, and state retention are checked against the running local stack. Monitoring requires its own implementation and validation when added.
+The implemented application must maintain separate 95% coverage gates for source and test code, Pyright standard mode, and Flake8 compliance. Container startup, HTTP training/prediction, and state retention are checked against the running local stack. Streamlit AppTest covers dashboard states and refresh behavior; the Compose smoke test checks the dashboard with a saved Evidently report and verifies its read-only runtime mount.
 
 ## Development workflow
 

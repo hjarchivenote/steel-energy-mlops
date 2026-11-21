@@ -109,37 +109,38 @@ def monitor_predictions(
         raise DataValidationError("Monitoring lookback must be between 1 and 720 hours.")
     if type(max_runs) is not int or not 1 <= max_runs <= 1000:
         raise DataValidationError("Monitoring run limit must be between 1 and 1000.")
-    train = load_training_partition(directory)
     client, experiment_id = open_store(workspace, "steel-energy-monitoring")
     version = champion_version(client, model_name)
     if version is None:
         raise DataValidationError("No validated champion is available for monitoring.")
     require_compatible_version(version)
-    if version.tags.get("train_sha256") != train.sha256:
-        raise DataValidationError("Monitoring reference must match the pinned champion's training checksum.")
     as_of = datetime.now(timezone.utc)
     since = as_of - timedelta(hours=lookback_hours)
-    current, run_ids, raw_rows = _current(client, model_name, str(version.version), since, as_of, max_runs)
-    summary: dict[str, Any] = {
-        "model_name": model_name, "model_version": str(version.version),
-        "feature_contract": version.tags["feature_contract"],
-        "reference": "training_partition", "train_sha256": train.sha256, "reference_rows": len(train.target),
-        "since_request_time": since.isoformat(), "as_of_request_time": as_of.isoformat(),
-        "max_runs": max_runs, "run_limit_reached": len(run_ids) == max_runs, "source_run_ids": run_ids,
-        "raw_rows": raw_rows, "unique_rows": len(current), "duplicate_rows_removed": raw_rows - len(current),
-        "current_first_timestamp": None if current.empty else current["timestamp"].iloc[0],
-        "current_last_timestamp": None if current.empty else current["timestamp"].iloc[-1],
-        "minimum_rows_per_dataset": MINIMUM_ROWS, "drift_threshold": DRIFT_THRESHOLD,
-        "report_decimal_places": REPORT_DECIMAL_PLACES,
-        "status": "insufficient_data", "drifted_columns": [], "column_scores": {}, "html_artifact": None,
-        "performance_evaluated": False, "test_evaluated": False, "registry_mutated": False,
-        "interpretation": INTERPRETATION,
-    }
     with mlflow.start_run(experiment_id=experiment_id, run_name="request-distribution-monitoring") as run:
-        summary["run_id"] = run.info.run_id
         mlflow.set_tag("operation", "request_distribution_monitoring")
         mlflow.log_params({"model_name": model_name, "model_version": str(version.version),
-                           "train_sha256": train.sha256, "lookback_hours": lookback_hours, "max_runs": max_runs})
+                           "train_sha256": version.tags.get("train_sha256", ""),
+                           "lookback_hours": lookback_hours, "max_runs": max_runs})
+        # Record the attempt before reading inputs so failures cannot leave an older verdict looking current.
+        train = load_training_partition(directory)
+        if version.tags.get("train_sha256") != train.sha256:
+            raise DataValidationError("Monitoring reference must match the pinned champion's training checksum.")
+        current, run_ids, raw_rows = _current(client, model_name, str(version.version), since, as_of, max_runs)
+        summary: dict[str, Any] = {
+            "run_id": run.info.run_id, "model_name": model_name, "model_version": str(version.version),
+            "feature_contract": version.tags["feature_contract"],
+            "reference": "training_partition", "train_sha256": train.sha256, "reference_rows": len(train.target),
+            "since_request_time": since.isoformat(), "as_of_request_time": as_of.isoformat(),
+            "max_runs": max_runs, "run_limit_reached": len(run_ids) == max_runs, "source_run_ids": run_ids,
+            "raw_rows": raw_rows, "unique_rows": len(current), "duplicate_rows_removed": raw_rows - len(current),
+            "current_first_timestamp": None if current.empty else current["timestamp"].iloc[0],
+            "current_last_timestamp": None if current.empty else current["timestamp"].iloc[-1],
+            "minimum_rows_per_dataset": MINIMUM_ROWS, "drift_threshold": DRIFT_THRESHOLD,
+            "report_decimal_places": REPORT_DECIMAL_PLACES,
+            "status": "insufficient_data", "drifted_columns": [], "column_scores": {}, "html_artifact": None,
+            "performance_evaluated": False, "test_evaluated": False, "registry_mutated": False,
+            "interpretation": INTERPRETATION,
+        }
         if len(current) >= MINIMUM_ROWS and len(train.target) >= MINIMUM_ROWS:
             model = load_model(f"models:/{model_name}/{version.version}")
             if not isinstance(model, Pipeline):

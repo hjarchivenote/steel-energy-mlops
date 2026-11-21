@@ -14,6 +14,7 @@ COPY requirements.txt ./
 RUN python -m pip install -r requirements.txt
 COPY pyproject.toml README.md ./
 COPY src ./src
+COPY dashboard/app.py ./dashboard/app.py
 RUN python -m pip install --no-deps . \
     && groupadd --gid 10001 app \
     && useradd --uid 10001 --gid app --create-home app \
@@ -21,6 +22,6 @@ RUN python -m pip install --no-deps . \
     && chown app:app /runtime
 
 USER 10001:10001
-EXPOSE 8000 5000
+EXPOSE 8000 5000 8501
 ENTRYPOINT ["steel-energy"]
 CMD ["serve", "--host", "0.0.0.0", "--workspace", "/runtime/mlflow", "--data", "/runtime/data/processed"]
