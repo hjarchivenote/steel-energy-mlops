@@ -1,6 +1,7 @@
 """Train, record, validate, and conditionally promote model versions."""
 
 import subprocess
+import os
 from dataclasses import asdict
 from datetime import datetime
 from importlib.metadata import version as package_version
@@ -78,6 +79,14 @@ def _train_locked(
         incumbent_metrics = error_metrics(data.validation.target, predictions)
 
     with mlflow.start_run(experiment_id=experiment_id, run_name="train-and-validate") as run:
+        job_id = os.environ.get("STEEL_ENERGY_TRAINING_JOB_ID")
+        if job_id:
+            request_id = os.environ.get("STEEL_ENERGY_TRAINING_REQUEST_ID", "unavailable")
+            mlflow.set_tags({"http_training_job_id": job_id, "http_training_request_id": request_id})
+            mlflow.log_dict({"job_id": job_id, "request_id": request_id, "model_name": model_name,
+                             "parameters": {"families": list(families), "forest_trees": forest_trees,
+                                            "minimum_improvement": minimum_improvement, "seed": seed}},
+                            "http_training_request.json")
         mlflow.log_params({
             "feature_contract": FEATURE_CONTRACT, "seed": seed, "forest_trees": forest_trees,
             "minimum_improvement": minimum_improvement, "candidate_families": ",".join(families),

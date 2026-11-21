@@ -6,7 +6,7 @@ This project uses measurements from a South Korean steel manufacturing facility 
 
 The repository supports an MLOps semester project at Óbuda University and will also serve as a portfolio project. The coursework uses a fixed 5,000-record sample; analysis of the complete dataset is a later extension within this same repository.
 
-> **Status: local training and prediction REST API implemented.** Data preparation, model comparison, MLflow experiment tracking and registry, validation-based promotion, logged CLI/HTTP predictions, and quality checks are implemented. The training REST endpoint, containerized services, and monitoring dashboard are still to be implemented. Reported model errors below are validation results; final test evaluation remains reserved.
+> **Status: local training and prediction REST APIs implemented.** Data preparation, model comparison, MLflow experiment tracking and registry, validation-based promotion, asynchronous training jobs, logged CLI/HTTP predictions, and quality checks are implemented. Containerized services and the monitoring dashboard are still to be implemented. Reported model errors below are validation results; final test evaluation remains reserved.
 
 ## Project objective
 
@@ -150,7 +150,7 @@ steel-energy train --families ridge
 
 Prediction operations record their exact timestamp request, generated features, response, and model version in MLflow. Tracking failures produce an error instead of an unrecorded successful response. Local training uses a workspace lock to prevent overlapping local promotion jobs; distributed deployment coordination remains future work.
 
-### Local prediction REST API
+### Local training and prediction REST API
 
 Start the service from the project root in the activated environment:
 
@@ -158,7 +158,7 @@ Start the service from the project root in the activated environment:
 steel-energy serve
 ```
 
-The default address is `http://127.0.0.1:8000`. Open [interactive API documentation](http://127.0.0.1:8000/docs) to inspect the input/output contracts and send a prediction request. The server also accepts `--workspace`, `--model-name`, `--host`, and `--port`; model names and filesystem paths are server configuration, not request-body inputs.
+The default address is `http://127.0.0.1:8000`. Open [interactive API documentation](http://127.0.0.1:8000/docs) to inspect the contracts and submit prediction or training requests. The server also accepts `--workspace`, `--model-name`, `--host`, `--port`, and `--data` (default `data/processed`, used for training); model names and filesystem paths are server configuration, not request-body inputs.
 
 ```bash
 curl --fail-with-body http://127.0.0.1:8000/predict \
@@ -173,12 +173,36 @@ The dates demonstrate the interface; no 2019 target values are available to asse
 | `GET /health` | HTTP liveness, independent of model availability | `200`; audit storage failure produces `503` |
 | `GET /ready` | Resolve the champion, check its contract, and load the saved model | `200` with model metadata; `503` if unavailable or incompatible |
 | `POST /predict` | Predict with one pinned model version and record the result | `200`; `422` for invalid input; `503` for model/tracking/audit failures; `500` for unexpected errors |
+| `POST /train` | Start one isolated training job using a fixed snapshot | `202` with job ID and status URL; `409` if training is active; `422` for invalid options; `503` if admission fails |
+| `GET /train/{job_id}` | Read job state, final training result, and promotion checks | `200`; `404` for an unknown job; `503` for unavailable status storage |
 
 The JSON body accepts only `timestamps`: a list of 1-1,000 ISO datetime **strings**, without a timezone and on the 15-minute grid. Empty lists, numeric dates, date-only strings, timezone offsets, nonzero seconds/microseconds, and extra fields are rejected before model access. Timestamps are canonicalized for prediction artifacts; duplicates and original input order are retained. Error responses expose a request ID and actionable error category without internal storage paths or stack traces.
 
 Every response receives a server-generated `X-Request-ID`. Application requests, including invalid input and failed predictions, append a locked JSON-lines audit record to `artifacts/mlflow/http_requests.jsonl`: UTC time, request ID, method, path, status, duration, and model/run IDs when available. Request headers and arbitrary raw payloads are not copied into the audit log. Successful predictions save canonical inputs, generated features, and the returned prediction payload in MLflow; the request ID also appears in the MLflow run tags. If HTTP audit storage fails, the application returns `503` rather than an unrecorded success. Such a failed HTTP response can follow a completed MLflow prediction run.
 
-The service uses one worker and serializes model/tracking operations within the process because fluent MLflow configuration and native thread limits are shared state. HTTP validation and liveness remain responsive during inference; integration tests exercise concurrent requests across separate model stores. This is a local serving implementation, with distributed coordination and load testing left for a later runtime stage. The training API remains pending; model training currently uses the CLI or MLflow Projects.
+Prediction and readiness use one API worker and serialize model/tracking operations within that process because fluent MLflow configuration and native thread limits are shared state. HTTP validation and liveness remain responsive during inference; integration tests exercise concurrent requests across separate model stores. Training runs in a separate Python process, so it does not take this prediction-operation lock or overwrite the web process's fluent tracking configuration. Distributed coordination and load testing remain later runtime work.
+
+### Submit and inspect a training job
+
+```bash
+curl --fail-with-body http://127.0.0.1:8000/train \
+  -H 'Content-Type: application/json' \
+  -d '{"families":["ridge","random_forest","hist_gradient_boosting"],"forest_trees":100,"minimum_improvement":0.01,"seed":42}'
+```
+
+An empty JSON object uses those defaults. The response is `202 Accepted` and contains `job_id`, `training_request_id`, and `status_url`; its `Location` header points to the same status URL. Query that URL, for example `GET /train/<job_id>`, until `status` becomes `succeeded`, `failed`, or `interrupted`. While training runs, status is `running`; percentage progress is not estimated. Each status query has its own request ID while retaining the original training request ID.
+
+The training options are bounded: one to three unique supported families, 1-500 forest trees, an improvement threshold in `[0.01, 1)`, and an integer seed in `[0, 2**32-1]`. Numeric strings, booleans in integer fields, extra fields, client-provided paths, target values, and model names are rejected. The endpoint keeps the existing train-only model selection and `calendar-reference-v2` promotion policy.
+
+`succeeded` means training and result recording completed. The returned `result.promoted` separately reports whether the champion changed; `false` includes the rejection reason and every comparison. Failed workers record an error category and exit code. Detailed worker output stays in the local job directory rather than being exposed as a server traceback.
+
+Admission copies only `train.csv`, `validation.csv`, and `manifest.json` into `artifacts/mlflow/training_jobs/<job_id>/data` and verifies their checksums before spawning the worker. The final test CSV is neither copied nor loaded. This immutable snapshot prevents later preparation runs from changing an admitted job's inputs. Job metadata records the canonical training options, data hashes, and original HTTP request ID before execution; the training run adds matching job/request tags and `http_training_request.json` in MLflow.
+
+A workspace admits one API training job at a time, without an unbounded queue. A cross-process admission lock rejects duplicates across API instances, and admission checks the existing CLI training lock. The child takes the normal training lock as well; if another CLI job wins a later race, that attempt fails instead of overlapping promotion. The current champion can still serve predictions during training.
+
+Job state is atomically persisted in `job.json`, while the worker's result and diagnostic log stay in `result.json` and `training.log`. Completed jobs remain queryable after restarting the API. Graceful shutdown waits for its active worker to finish. A record left by an abruptly stopped API can be reconciled when the recorded worker PID is no longer alive: a valid saved result becomes `succeeded`, otherwise it becomes `interrupted`. This local PID-based recovery assumes a single host and does not provide a distributed queue or strong identity across PID reuse.
+
+HTTP audit records include the training job ID and, after completion, its MLflow run ID. If HTTP audit writing fails after a job has already started, the response is `503` **with the admitted job ID and status URL**; inspect that job rather than assuming training did not start and submitting another job. The durable job record remains the admission record in this case.
 
 **MLflow Projects entry points**
 
@@ -252,7 +276,7 @@ python -m pre_commit run --all-files
 
 The same checks run automatically before local commits and in GitHub Actions: Flake8 for Python files, Pyright standard mode for `src/`, pytest with branch coverage, and separate minimum 95% coverage gates for `src/` and `tests/`. No application or test files are omitted from coverage.
 
-The tests cover invalid data, chronological isolation, feature leakage, reproducible outputs, CV windows, promotion acceptance/rejection, real SQLite tracking and registry behavior, saved-model round trips, request artifacts, HTTP schemas and errors, audit failures, concurrent prediction isolation, locking, and failure handling. API integration tests serve saved models after removing the prepared synthetic CSVs. Tests use synthetic observations and never train or select models using the real final evaluation data.
+The tests cover invalid data, chronological isolation, feature leakage, reproducible outputs, CV windows, promotion acceptance/rejection, real SQLite tracking and registry behavior, saved-model round trips, request artifacts, HTTP schemas and errors, audit failures, concurrent prediction isolation, isolated training subprocesses, immutable training snapshots, duplicate admission, persisted job recovery, and failure handling. Prediction integration tests serve saved models after removing the prepared synthetic CSVs. Training API integration tests remove the final test CSV before starting any job. Tests use synthetic observations and never train or select models using the real final evaluation data.
 
 ## Implementation scope
 
@@ -263,7 +287,7 @@ The tests cover invalid data, chronological isolation, feature leakage, reproduc
 | Modeling | Train-only CV, constant and schedule-aware comparisons, validation error slices | Implemented; final test evaluation reserved |
 | Experiment tracking | MLflow Projects, artifacts, reloadable models, registry | Implemented locally |
 | Model management | Candidate comparison and promotion safeguards | Implemented locally |
-| Serving | Version-pinned CLI/REST prediction, liveness/readiness, request records | Prediction API implemented locally; training REST endpoint pending |
+| Serving | Version-pinned prediction, isolated training jobs, status queries, request records | Training and prediction APIs implemented locally |
 | Monitoring | Evidently reports displayed in Streamlit | Planned |
 | Runtime | Docker images and a single Compose startup command | Planned |
 | Quality | Tests, coverage, Flake8, Pyright, pre-commit, GitHub Actions | Implemented for current application code |

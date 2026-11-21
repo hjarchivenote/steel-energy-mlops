@@ -60,6 +60,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
     serve.add_argument("--model-name", default=DEFAULT_MODEL)
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=_port, default=8000)
+    serve.add_argument("--data", type=Path, default=Path("data/processed"))
     args = parser.parse_args(arguments)
     try:
         if args.command == "prepare-data":
@@ -72,7 +73,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
         elif args.command == "evaluate":
             result = evaluate_champion(args.data, args.workspace, args.model_name)
         elif args.command == "serve":
-            uvicorn.run(create_app(args.workspace, args.model_name), host=args.host, port=args.port, workers=1)
+            uvicorn.run(create_app(args.workspace, args.model_name, args.data),
+                        host=args.host, port=args.port, workers=1)
             return 0
         else:
             result = predict_consumption(tuple(args.timestamp), args.workspace, args.model_name)

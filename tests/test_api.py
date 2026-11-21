@@ -295,7 +295,7 @@ def test_serve_cli_passes_server_configuration_without_printing_prediction_json(
     calls = []
     monkeypatch.setattr(cli.uvicorn, "run", lambda app, **kwargs: calls.append((app, kwargs)))
     assert main(["serve", "--workspace", str(tmp_path), "--model-name", "api-test", "--port", "8123"]) == 0
-    assert calls[0][0].title == "Steel Energy Prediction API"
+    assert calls[0][0].title == "Steel Energy MLOps API"
     assert calls[0][1] == {"host": "127.0.0.1", "port": 8123, "workers": 1}
     assert capsys.readouterr().out == ""
 
